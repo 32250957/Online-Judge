@@ -323,6 +323,22 @@ class JudgeJob(Base):
     submission = relationship("Submission")
 
 
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    actor_username = Column(String(50), nullable=False, default="")
+    action = Column(String(80), nullable=False, index=True)
+    target_type = Column(String(80), nullable=False, default="")
+    target_id = Column(Integer, nullable=True)
+    summary = Column(Text, nullable=False, default="")
+    ip_address = Column(String(80), nullable=False, default="")
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
+
+    actor = relationship("User")
+
+
 class JudgeLog(Base):
     __tablename__ = "judge_logs"
 

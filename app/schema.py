@@ -15,6 +15,7 @@ DATETIME_COLUMNS = [
     ("group_problem_sets", "created_at"), ("group_contests", "created_at"),
     ("group_practices", "start_time"), ("group_practices", "end_time"), ("group_practices", "created_at"),
     ("judge_logs", "created_at"),
+    ("audit_logs", "created_at"),
     ("judge_jobs", "created_at"), ("judge_jobs", "started_at"), ("judge_jobs", "finished_at"),
     ("board_posts", "created_at"), ("board_posts", "updated_at"),
     ("board_comments", "created_at"),
@@ -29,6 +30,9 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_submissions_judge_status ON submissions (judge_status)",
     "CREATE INDEX IF NOT EXISTS ix_judge_jobs_status_priority_id ON judge_jobs (status, priority, id)",
     "CREATE INDEX IF NOT EXISTS ix_judge_logs_event_created_at ON judge_logs (event, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_action_created_at ON audit_logs (action, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_created_at ON audit_logs (actor_id, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_contest_problems_contest_order ON contest_problems (contest_id, order_index)",
     "CREATE INDEX IF NOT EXISTS ix_problems_origin_review ON problems (origin_type, review_status)",
     "CREATE INDEX IF NOT EXISTS ix_group_members_user_id ON group_members (user_id)",
@@ -105,12 +109,13 @@ KNOWN_TABLE_COLUMNS = {
     "board_posts": {"id", "display_number", "board_scope", "board_type", "group_id", "author_id", "title", "content", "is_pinned", "created_at", "updated_at"},
     "problems": {"id", "title", "description", "input_description", "output_description", "time_limit", "memory_limit", "is_contest_only", "is_public", "force_private_submission", "is_judge_ready", "difficulty", "tags", "source", "problem_author", "error_finder", "typo_finder", "allowed_languages", "origin_type", "origin_group_id", "origin_contest_id", "review_status", "display_code"},
     "judge_jobs": {"id", "submission_id", "job_type", "status", "priority", "attempts", "worker_name", "error_message", "created_at", "started_at", "finished_at"},
+    "audit_logs": {"id", "actor_id", "actor_username", "action", "target_type", "target_id", "summary", "ip_address", "created_at"},
 }
 
 SERIAL_TABLES = [
     "users", "problems", "contests", "problem_examples", "problem_notes", "problem_hints", "submissions", "contest_questions", "contest_editorials",
     "groups", "messages", "group_join_requests", "group_problem_sets", "group_contests",
-    "group_practices", "group_problem_set_problems", "group_practice_problems", "judge_jobs", "judge_logs", "board_posts", "board_comments",
+    "group_practices", "group_problem_set_problems", "group_practice_problems", "judge_jobs", "judge_logs", "audit_logs", "board_posts", "board_comments",
 ]
 
 

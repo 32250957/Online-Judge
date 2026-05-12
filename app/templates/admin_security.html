@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>관리자 보안 설정</h2>
+<p class="hint">관리자 아이디/비밀번호 변경, 관리자 계정 생성, 관리자 권한 회수를 관리합니다. 마지막 관리자 권한은 회수할 수 없습니다.</p>
+
+<div class="box">
+    <h3>새 관리자 계정 생성</h3>
+    <form action="/admin/security/create-admin" method="post" class="inline-form stacked-inline-form">
+        <input type="text" name="username" placeholder="관리자 아이디" required>
+        <input type="text" name="password" placeholder="초기 비밀번호" required>
+        <input type="text" name="full_name" placeholder="이름(선택)">
+        <input type="text" name="student_id" placeholder="학번/식별번호(선택)">
+        <button type="submit" onclick="return confirm('새 관리자 계정을 생성할까요?');">관리자 생성</button>
+    </form>
+</div>
+
+<div class="box">
+    <h3>현재 관리자 계정</h3>
+    <table>
+        <thead>
+            <tr><th>ID</th><th>아이디</th><th>이름/학번</th><th>아이디 변경</th><th>비밀번호 변경</th><th>권한</th></tr>
+        </thead>
+        <tbody>
+        {% for item in admins %}
+        <tr>
+            <td>{{ item.id }}</td>
+            <td>{{ item.username }}{% if item.id == user.id %} <span class="badge">현재 로그인</span>{% endif %}</td>
+            <td>{{ item.full_name or '-' }} / {{ item.student_id or '-' }}</td>
+            <td>
+                <form action="/admin/security/users/{{ item.id }}/username" method="post" class="inline-form">
+                    <input type="text" name="username" value="{{ item.username }}" required>
+                    <button type="submit">변경</button>
+                </form>
+            </td>
+            <td>
+                <form action="/admin/security/users/{{ item.id }}/password" method="post" class="inline-form stacked-inline-form" onsubmit="return confirm('이 계정의 비밀번호를 변경할까요?');">
+                    <input type="text" name="new_password" placeholder="새 비밀번호" required>
+                    <label><input type="checkbox" name="force_change" checked> 다음 로그인 시 변경 요구</label>
+                    <button type="submit">비밀번호 변경</button>
+                </form>
+            </td>
+            <td>
+                {% if item.id == user.id %}
+                    <span class="hint">본인 권한 회수 제한</span>
+                {% elif admin_count <= 1 %}
+                    <span class="hint">마지막 관리자</span>
+                {% else %}
+                    <form action="/admin/security/users/{{ item.id }}/admin-role" method="post" onsubmit="return confirm('관리자 권한을 회수할까요?');">
+                        <button type="submit">관리자 권한 회수</button>
+                    </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">관리자 계정이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="box">
+    <h3>일반 회원을 관리자로 지정</h3>
+    <p class="hint">이미 관리자인 계정은 위 목록에서 관리합니다.</p>
+    <input type="text" id="securityUserSearch" placeholder="아이디, 이름, 학번 검색" oninput="filterSecurityUsers()">
+    <table>
+        <thead><tr><th>ID</th><th>아이디</th><th>이름</th><th>학번</th><th>처리</th></tr></thead>
+        <tbody>
+        {% for item in users %}
+        {% if not item.is_admin %}
+        <tr class="security-user-row" data-search="{{ item.id }} {{ item.username|lower }} {{ item.full_name|lower }} {{ item.student_id|lower }}">
+            <td>{{ item.id }}</td>
+            <td>{{ item.username }}</td>
+            <td>{{ item.full_name or '-' }}</td>
+            <td>{{ item.student_id or '-' }}</td>
+            <td>
+                <form action="/admin/security/users/{{ item.id }}/admin-role" method="post" onsubmit="return confirm('이 회원을 관리자로 지정할까요?');">
+                    <input type="hidden" name="is_admin" value="on">
+                    <button type="submit">관리자 지정</button>
+                </form>
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+function filterSecurityUsers() {
+    const keyword = document.getElementById("securityUserSearch").value.trim().toLowerCase();
+    document.querySelectorAll(".security-user-row").forEach(row => {
+        row.style.display = !keyword || row.dataset.search.includes(keyword) ? "" : "none";
+    });
+}
+</script>
+{% endblock %}

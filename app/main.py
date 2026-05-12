@@ -24,7 +24,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import SessionLocal, engine
 from app.schema import ensure_postgresql_schema
-from app.models import User, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, ContestEditorial, BoardPost, BoardComment
+from app.models import User, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment
 from app.security import hash_password, verify_password
 from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES
 from app.services.domain import (
@@ -402,6 +402,24 @@ def save_problem_notes_and_hints(db: Session, problem: Problem, notes_text: str,
         if content.strip():
             db.add(ProblemHint(problem_id=problem.id, content=content.strip(), order_index=index))
 
+
+
+
+def audit_log(db: Session, request: Request | None, actor: Optional[User], action: str, target_type: str = "", target_id: int | None = None, summary: str = "") -> AuditLog:
+    ip_address = ""
+    if request is not None and request.client is not None:
+        ip_address = request.client.host or ""
+    row = AuditLog(
+        actor_id=actor.id if actor else None,
+        actor_username=actor.username if actor else "",
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        summary=summary[:4000],
+        ip_address=ip_address,
+    )
+    db.add(row)
+    return row
 
 def create_message(db: Session, user_id: int, title: str, content: str = "", message_type: str = "notice", related_group_id: int | None = None, related_submission_id: int | None = None, action_status: str = "none") -> Message:
     message = Message(user_id=user_id, title=title, content=content, message_type=message_type, related_group_id=related_group_id, related_submission_id=related_submission_id, action_status=action_status)
@@ -1525,6 +1543,8 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     request.session["user_id"] = user.id
     request.session["username"] = user.username
     request.session["is_admin"] = user.is_admin
+    audit_log(db, request, user, "login", "user", user.id, "로그인")
+    db.commit()
     if getattr(user, "must_change_password", False):
         return RedirectResponse(url="/change-password", status_code=303)
     return RedirectResponse(url="/", status_code=303)
@@ -1823,6 +1843,17 @@ def cancel_single_judge_job(db: Session, job_id: int, actor: str = "admin") -> b
     db.commit()
     return True
 
+def count_stuck_running_judge_jobs(db: Session, minutes: int = 10) -> int:
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    return (
+        db.query(JudgeJob)
+        .filter(JudgeJob.status == "RUNNING")
+        .filter(JudgeJob.started_at.isnot(None))
+        .filter(JudgeJob.started_at < cutoff)
+        .count()
+    )
+
+
 def submission_status_payload(submission: Submission, detail_visible: bool = False) -> dict:
     return {
         "id": submission.id,
@@ -1918,7 +1949,7 @@ def api_worker_status(request: Request, db: Session = Depends(get_db)):
         "queued_jobs": db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count(),
         "running_jobs": db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count(),
         "failed_jobs": db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count(),
-        "stuck": db.query(Submission).filter(Submission.judge_status == "JUDGING", Submission.created_at < stuck_cutoff).count(),
+        "stuck": count_stuck_running_judge_jobs(db),
         "failed": db.query(Submission).filter(Submission.judge_status == "FAILED").count(),
         "auto_requeued": auto_requeued,
         "active_workers": active_workers,
@@ -1946,7 +1977,7 @@ def admin_worker_page(request: Request, db: Session = Depends(get_db)):
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
     failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count()
-    stuck = db.query(Submission).filter(Submission.judge_status == "JUDGING", Submission.created_at < stuck_cutoff).count()
+    stuck = count_stuck_running_judge_jobs(db)
     failed = db.query(Submission).filter(Submission.judge_status == "FAILED").count()
     logs = db.query(JudgeLog).order_by(JudgeLog.id.desc()).limit(100).all()
     recent_jobs = db.query(JudgeJob).order_by(JudgeJob.id.desc()).limit(100).all()
@@ -1972,7 +2003,7 @@ def admin_judge_queue_page(request: Request, status: str = Query(""), db: Sessio
     jobs = query.limit(300).all()
     counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in statuses}
     stuck_cutoff = datetime.utcnow() - timedelta(minutes=10)
-    stuck_count = db.query(Submission).filter(Submission.judge_status == "JUDGING", Submission.created_at < stuck_cutoff).count()
+    stuck_count = count_stuck_running_judge_jobs(db)
     heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(20).all()
     active_workers = len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
@@ -2495,8 +2526,157 @@ def admin_page(request: Request, db: Session = Depends(get_db)):
         "active_worker_count": len({log.worker_name for log in db.query(JudgeLog).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= datetime.utcnow() - timedelta(minutes=2)).order_by(JudgeLog.id.desc()).limit(20).all()}),
         "ranking_cache_size": len(RANKING_CACHE),
         "slow_request_count": len(SLOW_REQUESTS),
+        "recent_audit_logs": db.query(AuditLog).order_by(AuditLog.id.desc()).limit(8).all(),
     })
 
+
+
+@app.get("/admin/security", response_class=HTMLResponse)
+def admin_security_page(request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    admins = db.query(User).filter(User.is_admin == True).order_by(User.id.asc()).all()  # noqa: E712
+    all_users = db.query(User).order_by(User.id.asc()).all()
+    return templates.TemplateResponse("admin_security.html", {
+        "request": request,
+        "user": user,
+        "admins": admins,
+        "users": all_users,
+        "admin_count": len(admins),
+    })
+
+
+@app.post("/admin/security/create-admin")
+def admin_security_create_admin(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    full_name: str = Form(""),
+    student_id: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin = require_admin(request, db)
+    username = username.strip()
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="아이디는 3자 이상이어야 합니다.")
+    if len(password) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    if db.query(User).filter(User.username == username).first() is not None:
+        raise HTTPException(status_code=400, detail="이미 사용 중인 아이디입니다.")
+    target = User(
+        username=username,
+        password_hash=hash_password(password),
+        is_admin=True,
+        full_name=full_name.strip()[:100],
+        student_id=student_id.strip()[:50],
+        must_change_password=True,
+    )
+    db.add(target)
+    db.flush()
+    audit_log(db, request, admin, "admin_create", "user", target.id, f"관리자 계정 생성: {target.username}")
+    db.commit()
+    return RedirectResponse(url="/admin/security", status_code=303)
+
+
+@app.post("/admin/security/users/{user_id}/username")
+def admin_security_update_username(user_id: int, request: Request, username: str = Form(...), db: Session = Depends(get_db)):
+    admin = require_admin(request, db)
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    new_username = username.strip()
+    if len(new_username) < 3:
+        raise HTTPException(status_code=400, detail="아이디는 3자 이상이어야 합니다.")
+    exists = db.query(User).filter(User.username == new_username, User.id != target.id).first()
+    if exists is not None:
+        raise HTTPException(status_code=400, detail="이미 사용 중인 아이디입니다.")
+    old_username = target.username
+    target.username = new_username
+    audit_log(db, request, admin, "admin_username_change", "user", target.id, f"아이디 변경: {old_username} -> {new_username}")
+    db.commit()
+    if target.id == admin.id:
+        request.session["username"] = target.username
+    return RedirectResponse(url="/admin/security", status_code=303)
+
+
+@app.post("/admin/security/users/{user_id}/password")
+def admin_security_update_password(
+    user_id: int,
+    request: Request,
+    new_password: str = Form(...),
+    force_change: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    admin = require_admin(request, db)
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if len(new_password) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    target.password_hash = hash_password(new_password)
+    target.must_change_password = bool(force_change)
+    if target.id != admin.id:
+        create_message(db, target.id, "비밀번호 변경 안내", "OJ 관리자가 비밀번호를 변경했습니다.", "notice")
+    audit_log(db, request, admin, "admin_password_change", "user", target.id, f"비밀번호 변경: {target.username}")
+    db.commit()
+    return RedirectResponse(url="/admin/security", status_code=303)
+
+
+@app.post("/admin/security/users/{user_id}/admin-role")
+def admin_security_update_admin_role(user_id: int, request: Request, is_admin: str | None = Form(None), db: Session = Depends(get_db)):
+    admin = require_admin(request, db)
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    make_admin = bool(is_admin)
+    if target.is_admin and not make_admin:
+        admin_count = db.query(User).filter(User.is_admin == True).count()  # noqa: E712
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="마지막 관리자 권한은 회수할 수 없습니다.")
+        if target.id == admin.id:
+            raise HTTPException(status_code=400, detail="현재 로그인한 본인의 관리자 권한은 여기서 회수할 수 없습니다.")
+    old = target.is_admin
+    target.is_admin = make_admin
+    if old != target.is_admin:
+        audit_log(db, request, admin, "admin_role_change", "user", target.id, f"관리자 권한 변경: {target.username} -> {'관리자' if target.is_admin else '일반'}")
+    db.commit()
+    return RedirectResponse(url="/admin/security", status_code=303)
+
+
+
+@app.get("/admin/audit-logs", response_class=HTMLResponse)
+def admin_audit_logs(
+    request: Request,
+    action: str = Query(""),
+    actor: str = Query(""),
+    target_type: str = Query(""),
+    page: int = Query(1),
+    db: Session = Depends(get_db),
+):
+    user = require_admin(request, db)
+    page = max(page, 1)
+    per_page = 50
+    query = db.query(AuditLog)
+    if action.strip():
+        query = query.filter(AuditLog.action.ilike(f"%{action.strip()}%"))
+    if actor.strip():
+        query = query.filter(AuditLog.actor_username.ilike(f"%{actor.strip()}%"))
+    if target_type.strip():
+        query = query.filter(AuditLog.target_type == target_type.strip())
+    total = query.count()
+    logs = query.order_by(AuditLog.id.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    actions = [row[0] for row in db.query(AuditLog.action).group_by(AuditLog.action).order_by(AuditLog.action.asc()).all()]
+    target_types = [row[0] for row in db.query(AuditLog.target_type).filter(AuditLog.target_type != "").group_by(AuditLog.target_type).order_by(AuditLog.target_type.asc()).all()]
+    return templates.TemplateResponse("admin_audit_logs.html", {
+        "request": request,
+        "user": user,
+        "logs": logs,
+        "actions": actions,
+        "target_types": target_types,
+        "filters": {"action": action, "actor": actor, "target_type": target_type},
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+    })
 
 @app.get("/admin/performance", response_class=HTMLResponse)
 def admin_performance_page(request: Request, db: Session = Depends(get_db)):
@@ -2759,6 +2939,7 @@ def admin_bulk_rejudge_problems(
         if count % 100 == 0:
             db.commit()
     create_message(db, user.id, "대량 재채점 등록 완료", f"검색 조건에 해당하는 {len(problem_ids)}개 문제의 제출 {count}건을 재채점 큐에 등록했습니다.", "rejudge_notice")
+    audit_log(db, request, user, "bulk_rejudge", "problem", None, f"{len(problem_ids)}개 문제, {count}건 재채점 등록")
     db.commit()
     return templates.TemplateResponse("rejudge_result.html", {
         "request": request,
@@ -2833,6 +3014,7 @@ def copy_problem(
             except Exception:
                 pass
 
+    audit_log(db, request, user, "problem_copy", "problem", copied.id, f"{source_problem.id}번 문제를 {copied.id}번으로 복제")
     db.commit()
     return RedirectResponse(url=f"/admin/problems/{copied.id}/edit", status_code=303)
 
@@ -2863,6 +3045,7 @@ def create_problem(request: Request, problem_id: int = Form(...), title: str = F
     except ValueError as e:
         db.rollback()
         return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": None, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": [], "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": "/admin/problems/new", "notes_text": notes_text, "hints_text": hints_text})
+    audit_log(db, request, user, "problem_create", "problem", problem.id, f"문제 생성: {problem.title}")
     db.commit()
     return RedirectResponse(url="/", status_code=303)
 
@@ -2917,12 +3100,15 @@ def edit_problem(problem_id: int, request: Request, title: str = Form(...), desc
     except ValueError as e:
         db.rollback()
         return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": problem, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": read_problem_testcases(problem.id), "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": f"/admin/problems/{problem.id}/edit", "notes_text": read_problem_notes(problem), "hints_text": read_problem_hints(problem)})
+    promoted = False
     if promote == "on" and can_manage_problem_public_settings(user, problem):
+        promoted = True
         problem.is_contest_only = False
         problem.is_public = True
         problem.force_private_submission = False
         problem.review_status = "approved"
         problem.display_code = None
+    audit_log(db, request, user, "problem_promote" if promoted else "problem_edit", "problem", problem.id, f"문제 수정: {problem.title}")
     db.commit()
     return RedirectResponse(url=f"/admin/problems/{problem.id}/edit", status_code=303)
 
@@ -2942,6 +3128,7 @@ def rejudge_problem(problem_id: int, request: Request, db: Session = Depends(get
         # 너무 오래 트랜잭션을 잡지 않도록 제출 하나마다 반영한다.
         db.commit()
     create_message(db, user.id, "문제 재채점 등록 완료", f"{problem.id}번 문제의 제출 {count}건을 재채점 큐에 등록했습니다.", "rejudge_notice")
+    audit_log(db, request, user, "problem_rejudge", "problem", problem.id, f"{count}건 재채점 등록")
     db.commit()
     return templates.TemplateResponse("rejudge_result.html", {
         "request": request,
@@ -2953,21 +3140,23 @@ def rejudge_problem(problem_id: int, request: Request, db: Session = Depends(get
 
 @app.post("/admin/submissions/{submission_id}/rejudge")
 def rejudge_single_submission(submission_id: int, request: Request, db: Session = Depends(get_db)):
-    require_admin(request, db)
+    user = require_admin(request, db)
     submission = db.query(Submission).filter(Submission.id == submission_id).first()
     if submission is None:
         raise HTTPException(status_code=404, detail="Submission not found")
     rejudge_submission(submission, db=db)
+    audit_log(db, request, user, "submission_rejudge", "submission", submission.id, f"제출 #{submission.id} 재채점 등록")
     db.commit()
     return RedirectResponse(url=f"/submissions/{submission.id}", status_code=303)
 
 
 @app.post("/admin/submissions/{submission_id}/delete")
 def delete_submission_admin(submission_id: int, request: Request, db: Session = Depends(get_db)):
-    require_admin(request, db)
+    user = require_admin(request, db)
     submission = db.query(Submission).filter(Submission.id == submission_id).first()
     if submission is None:
         raise HTTPException(status_code=404, detail="Submission not found")
+    audit_log(db, request, user, "submission_delete", "submission", submission.id, f"제출 삭제: #{submission.id}")
     delete_submission_tree(db, submission)
     db.commit()
     return RedirectResponse(url="/submissions", status_code=303)
@@ -2975,10 +3164,11 @@ def delete_submission_admin(submission_id: int, request: Request, db: Session = 
 
 @app.post("/admin/problems/{problem_id}/delete")
 def delete_problem_admin(problem_id: int, request: Request, db: Session = Depends(get_db)):
-    require_admin(request, db)
+    user = require_admin(request, db)
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
     if problem is None:
         raise HTTPException(status_code=404, detail="Problem not found")
+    audit_log(db, request, user, "problem_delete", "problem", problem.id, f"문제 삭제: {problem.title}")
     delete_problem_tree(db, problem)
     db.commit()
     return RedirectResponse(url="/", status_code=303)
@@ -3371,6 +3561,8 @@ def delete_group(group_id: int, request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_site_admin(user, group)
 
+    group_name = group.name
+    audit_log(db, request, user, "group_delete", "group", group.id, f"그룹 삭제: {group_name}")
     # 서비스 계층에서 하위 항목/연습 제출 참조까지 안전하게 정리한다.
     delete_group_tree(db, group)
     db.commit()
@@ -4078,6 +4270,7 @@ def update_contest_settings(contest_id: int, request: Request, is_exam_mode: str
         contest.is_public = is_public == "on"
     contest.score_enabled = score_enabled == "on"
     contest.result_display_mode = "full"
+    audit_log(db, request, user, "contest_settings", "contest", contest.id, f"대회 설정 변경: {contest.title}")
     db.commit()
     return RedirectResponse(url=f"/contests/{contest.id}", status_code=303)
 
@@ -4091,6 +4284,7 @@ def end_contest(contest_id: int, request: Request, db: Session = Depends(get_db)
     require_contest_manager(user, contest, db)
     contest.is_ended = True
     contest.end_time = now()
+    audit_log(db, request, user, "contest_end", "contest", contest.id, f"대회 종료: {contest.title}")
     db.commit()
     return RedirectResponse(url=f"/contests/{contest.id}", status_code=303)
 

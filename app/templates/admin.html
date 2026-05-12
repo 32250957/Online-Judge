@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>관리자 페이지</h2>
-<p><a class="button" href="/admin/permissions">권한 체계 점검</a> <a class="button" href="/admin/worker">채점 워커 상태</a> <a class="button" href="/admin/judge-queue">채점 큐 관리</a> <a class="button" href="/admin/performance">성능 점검</a></p>
+<p><a class="button" href="/admin/security">관리자 보안 설정</a> <a class="button" href="/admin/audit-logs">운영 로그</a> <a class="button" href="/admin/permissions">권한 체계 점검</a> <a class="button" href="/admin/worker">채점 워커 상태</a> <a class="button" href="/admin/judge-queue">채점 큐 관리</a> <a class="button" href="/admin/performance">성능 점검</a></p>
 <div class="grid">
     <div class="box"><h3>문제 수</h3><p class="big">{{ problem_count }}</p></div>
     <div class="box"><h3>회원 수</h3><p class="big">{{ user_count }}</p></div>
@@ -28,7 +28,9 @@
 <div class="box">
     <a class="button" href="/admin/problems/new">일반 문제 추가</a>
     <a class="button" href="/admin/problems">전체 문제 관리</a>
+    <a class="button" href="/admin/security">관리자 보안 설정</a>
     <a class="button" href="/admin/notifications">알림 / 공지 관리</a>
+    <a class="button" href="/admin/audit-logs">운영 로그 / 감사 기록</a>
     <a class="button" href="#admin-group-contests">그룹 대회 관리</a>
     <a class="button" href="/admin/contests/new">대회 개최</a>
     <a class="button" href="/admin/users">회원 관리 / 제출 제한</a>
@@ -39,6 +41,22 @@
     <a class="button" href="/admin/performance">성능 점검</a>
     <a class="button" href="/admin/diagnostics">시스템 점검</a>
     <a class="button" href="/admin/backups">백업 / 데이터 보존</a>
+</div>
+
+
+<div class="box">
+    <h3>최근 운영 로그</h3>
+    <table>
+        <thead><tr><th>시각</th><th>작업자</th><th>작업</th><th>요약</th></tr></thead>
+        <tbody>
+        {% for log in recent_audit_logs %}
+        <tr><td>{{ log.created_at }}</td><td>{{ log.actor_username or '-' }}</td><td><span class="badge">{{ log.action }}</span></td><td>{{ log.summary }}</td></tr>
+        {% else %}
+        <tr><td colspan="4">기록이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <p><a class="button" href="/admin/audit-logs">전체 운영 로그 보기</a></p>
 </div>
 
 <div class="box highlight-box">
