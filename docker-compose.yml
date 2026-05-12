@@ -41,7 +41,7 @@ services:
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
     ports:
-      - "8000:8000"
+      - "80:8000"
     volumes:
       - ./problems:/app/problems
       - ./uploads:/app/uploads
