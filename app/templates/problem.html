@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{% if contest and link %}{{ link.label }}번{% else %}{{ problem.id }}번{% endif %} - {{ problem.title }}</h2>
+<p class="hint">난이도: {{ problem.difficulty }}{% if problem.tags %} · 태그: {{ problem.tags }}{% endif %}{% if problem.source %} · 출처: {{ problem.source }}{% endif %} · 허용 언어: {{ allowed_language_labels(problem) }}</p>
+{% if problem.problem_author or problem.error_finder or problem.typo_finder %}
+<div class="meta-box">
+    {% if problem.problem_author %}<span><b>출제:</b> {{ problem.problem_author }}</span>{% endif %}
+    {% if problem.error_finder %}<span><b>오류 검수:</b> {{ problem.error_finder }}</span>{% endif %}
+    {% if problem.typo_finder %}<span><b>오타 제보/교정:</b> {{ problem.typo_finder }}</span>{% endif %}
+</div>
+{% endif %}
+{% if user and user.is_admin %}<p><a class="button" href="/admin/problems/{{ problem.id }}/edit">문제/테스트케이스 수정</a></p>{% endif %}
+
+{% if contest %}
+<div class="info-box">
+    <b>대회:</b> <a href="/contests/{{ contest.id }}">{{ contest.title }}</a><br>
+    <b>시작:</b> {{ contest.start_time }}<br>
+    <b>종료:</b> {{ contest.end_time }}<br>
+    <b>상태:</b> {% if contest.is_ended %}강제 종료{% elif now < contest.start_time %}시작 전{% elif now > contest.end_time %}종료{% else %}진행 중{% endif %}<br>
+    <b>남은 시간:</b> <span id="timer"></span>
+</div>
+<script>
+const endTime = new Date("{{ contest.end_time.isoformat() }}").getTime();
+const manuallyEnded = {{ "true" if contest.is_ended else "false" }};
+function updateTimer() {
+    const diff = endTime - Date.now();
+    const timer = document.getElementById("timer");
+    if (manuallyEnded || diff <= 0) { timer.textContent = "대회 종료"; return; }
+    const h = Math.floor(diff / 1000 / 60 / 60);
+    const m = Math.floor(diff / 1000 / 60) % 60;
+    const s = Math.floor(diff / 1000) % 60;
+    timer.textContent = `${h}시간 ${m}분 ${s}초`;
+}
+updateTimer(); setInterval(updateTimer, 1000);
+</script>
+{% endif %}
+
+{% if practice and group %}
+<div class="info-box">
+    <b>그룹 연습:</b> <a href="/groups/{{ group.id }}#practice">{{ group.name }} / {{ practice.title }}</a><br>
+    <b>시작:</b> {{ practice.start_time if practice.start_time else "제한 없음" }}<br>
+    <b>종료:</b> {{ practice.end_time if practice.end_time else "제한 없음" }}
+</div>
+{% endif %}
+
+<section class="box"><h3>문제</h3>{{ problem.description|rich_text }}</section>
+<section class="box"><h3>입력</h3>{{ problem.input_description|rich_text }}</section>
+<section class="box"><h3>출력</h3>{{ problem.output_description|rich_text }}</section>
+
+{% if problem.notes %}
+<section class="box">
+    <h3>노트</h3>
+    {% for note in problem.notes %}
+    <div class="sub-box">
+        <h4>노트 {{ loop.index }}</h4>
+        {{ note.content|rich_text }}
+    </div>
+    {% endfor %}
+</section>
+{% endif %}
+
+{% if problem.hints %}
+<section class="box">
+    <h3>힌트</h3>
+    {% for hint in problem.hints %}
+    <details class="sub-box question-card">
+        <summary>힌트 {{ loop.index }}</summary>
+        {{ hint.content|rich_text }}
+    </details>
+    {% endfor %}
+</section>
+{% endif %}
+
+{% if problem.examples %}
+<section class="box">
+    <h3>예제</h3>
+    {% for example in problem.examples %}
+    <div class="example-row">
+        <div><h4>예제 입력 {{ loop.index }}</h4><pre>{{ example.input_text }}</pre></div>
+        <div><h4>예제 출력 {{ loop.index }}</h4><pre>{{ example.output_text }}</pre></div>
+    </div>
+    {% endfor %}
+</section>
+{% endif %}
+
+<section class="box">
+    <h3>제출</h3>
+    {% if user %}
+        {% if not problem.is_judge_ready %}
+            <div class="error-box">채점 준비 중인 문제입니다. 지문은 볼 수 있지만 아직 제출할 수 없습니다.</div>
+        {% elif user.submit_banned_until and user.submit_banned_until > now %}
+            <div class="error-box">제출 제한 중입니다.<br>제한 종료: {{ user.submit_banned_until }}<br>사유: {{ user.ban_reason if user.ban_reason else "-" }}</div>
+        {% elif contest and (contest.is_ended or now < contest.start_time or now > contest.end_time) %}
+            <div class="error-box">현재 제출할 수 없는 대회 상태입니다.</div>
+        {% elif practice and ((practice.start_time and now < practice.start_time) or (practice.end_time and now > practice.end_time)) %}
+            <div class="error-box">현재 제출할 수 없는 연습 상태입니다.</div>
+        {% else %}
+            <form action="/submit" method="post">
+                <input type="hidden" name="problem_id" value="{{ problem.id }}">
+                {% if contest %}<input type="hidden" name="contest_id" value="{{ contest.id }}">{% endif %}
+                {% if practice %}<input type="hidden" name="practice_id" value="{{ practice.id }}">{% endif %}
+                <label>언어</label>
+                <select name="language">
+                    {% for lang in language_options %}
+                    <option value="{{ lang.value }}">{{ lang.label }}</option>
+                    {% endfor %}
+                </select>
+                {% if not contest %}
+                <label>제출 코드 공개 설정</label>
+                <select name="visibility">
+                    <option value="private" selected>비공개</option>
+                    <option value="public">공개</option>
+                    <option value="accepted_only">맞았을 때만 공개</option>
+                </select>
+                {% if problem.force_private_submission %}
+                <p class="hint">이 문제는 관리자가 제출 코드 강제 비공개를 켰기 때문에 공개 설정과 관계없이 타인이 코드를 볼 수 없습니다.</p>
+                {% endif %}
+                {% else %}
+                <input type="hidden" name="visibility" value="private">
+                <p class="hint">대회 제출 코드는 제출자 본인과 관리자만 볼 수 있습니다.</p>
+                {% endif %}
+                <label>코드</label>
+                <textarea name="code" required>print("Hello")</textarea>
+                <button type="submit">제출</button>
+            </form>
+        {% endif %}
+    {% else %}
+        <p>제출하려면 로그인해야 합니다.</p>
+    {% endif %}
+</section>
+{% endblock %}

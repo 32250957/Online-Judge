@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero box">
+    <h2>온라인 저지</h2>
+    <p>이 곳에서 알고리즘 문제를 풀고, 채점 받으며 알고리즘 공부를 할 수 있습니다.</p>
+    <div class="hero-actions">
+        <a class="button" href="/problems">문제 풀기</a>
+        <a class="button secondary" href="/contests">대회 보기</a>
+        <a class="button secondary" href="/boards/all">공지사항</a>
+    </div>
+</section>
+
+<div class="dashboard-grid">
+    <section class="box">
+        <h3>공지사항</h3>
+        {% for post in notices %}
+        <p><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a><br><span class="hint">{{ post.created_at }} · {{ post.author.username if post.author else '-' }}</span></p>
+        {% else %}<p class="hint">등록된 공지사항이 없습니다.</p>{% endfor %}
+    </section>
+    <section class="box">
+        <h3>최근 게시글</h3>
+        {% for post in board_posts %}
+        <p><span class="badge">{{ BOARD_TYPES.get(post.board_type, post.board_type) }}</span> <a href="/boards/posts/{{ post.id }}">{{ post.title }}</a></p>
+        {% else %}<p class="hint">등록된 게시글이 없습니다.</p>{% endfor %}
+    </section>
+    <section class="box">
+        <h3>최근 문제</h3>
+        {% for problem in recent_problems %}
+        <p><a href="/problems/{{ problem.id }}">{{ problem.id }}. {{ problem.title }}</a></p>
+        {% else %}<p class="hint">등록된 문제가 없습니다.</p>{% endfor %}
+    </section>
+    <section class="box">
+        <h3>최근 대회</h3>
+        {% for contest in recent_contests %}
+        <p><a href="/contests/{{ contest.id }}">{{ contest.title }}</a><br><span class="hint">{{ contest.start_time }} ~ {{ contest.end_time }}</span></p>
+        {% else %}<p class="hint">등록된 대회가 없습니다.</p>{% endfor %}
+    </section>
+</div>
+{% endblock %}

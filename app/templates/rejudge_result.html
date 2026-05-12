@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box">
+    <h2>재채점 요청 완료</h2>
+    {% if problem is defined and problem %}
+    <p><b>문제:</b> {{ problem.id }} - {{ problem.title }}</p>
+    <a class="button" href="/admin/problems/{{ problem.id }}/edit">문제 수정 화면으로 돌아가기</a>
+    {% elif contest is defined and contest %}
+    <p><b>대회:</b> {{ contest.id }} - {{ contest.title }}</p>
+    <a class="button" href="/contests/{{ contest.id }}">대회로 돌아가기</a>
+    {% endif %}
+    {% if message is defined and message %}<p>{{ message }}</p>{% endif %}
+    <p><b>재채점한 제출 수:</b> {{ count }}</p>
+    <p class="hint">제출들은 WAITING 상태로 돌아가며 워커가 순서대로 다시 채점합니다.</p>
+    <a class="button" href="/submissions">제출 기록 확인</a>
+</section>
+{% endblock %}

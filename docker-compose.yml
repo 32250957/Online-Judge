@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: oj-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: oj
+      POSTGRES_PASSWORD: ojpass
+      POSTGRES_DB: ojdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oj -d ojdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  init:
+    build: .
+    container_name: oj-init
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+    volumes:
+      - ./problems:/app/problems
+    command: python init_db.py
+
+  web:
+    build: .
+    container_name: oj-web
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./problems:/app/problems
+      - ./uploads:/app/uploads
+      - ./judge_work:/tmp/oj_judge_work
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
+      OJ_WORKER_NAME: ${OJ_WORKER_NAME:-docker-worker}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./problems:/app/problems
+      - ./uploads:/app/uploads
+      - ./judge_work:/tmp/oj_judge_work
+    command: sh -c "docker --version && docker pull python:3.11-slim && docker pull gcc:13 && docker pull eclipse-temurin:17 && python worker.py"
+
+volumes:
+  postgres_data:

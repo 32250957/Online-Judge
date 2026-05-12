@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>대회 개최</h2>
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+<form action="/admin/contests/new" method="post" class="box">
+    <h3>대회 정보</h3>
+    <label>대회명</label><input type="text" name="title" required>
+    <label>대회 설명</label><textarea name="description" required></textarea>
+    <label>대회 시작 시각</label><input type="datetime-local" name="start_time" value="{{ default_start }}" required>
+    <label>대회 종료 시각</label><input type="datetime-local" name="end_time" value="{{ default_end }}" required>
+
+    <h3>시험/평가 모드</h3>
+    <p class="hint">시험 모드는 학교 분반 승인 그룹의 그룹 대회에서만 사용할 수 있습니다. 일반 대회에서는 사용할 수 없습니다.</p>
+    <label><input type="checkbox" name="hide_ranking"> 순위표 숨김</label>
+    <label><input type="checkbox" name="score_enabled"> 문제별 배점 기능 사용</label>
+    <p class="hint">배점 기능을 켜면 대회 문제별 점수 입력과 점수표 기능을 사용할 수 있습니다.</p>
+    <p class="hint">상세 채점 메시지는 관리자에게만 보이고, 일반 참가자는 실행시간과 메모리만 확인할 수 있습니다.</p>
+
+    <h3>초기 대회 문제 번호 입력</h3>
+    <p class="hint">비워두고 대회만 먼저 만든 뒤, 대회 상세 화면의 문제 추가 탭에서 기존 문제나 새 대회 전용 문제를 나중에 추가할 수 있습니다. 입력한 순서대로 A, B, C가 붙습니다. 예: 1001,1000,1002</p>
+    <input type="text" name="problem_order" placeholder="선택 사항: 1000,1001">
+    <button type="submit">대회 개최</button>
+</form>
+{% endblock %}

@@ -1,0 +1,466 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box">
+    <h2>{{ group.name }}</h2>
+    {{ group.description|rich_text }}
+    <p><b>소유자:</b> {{ group.owner.username if group.owner else "-" }}</p>
+    <p><b>공개 여부:</b> {{ "공개" if group.is_public else "비공개" }}</p>
+    <p><b>학교 분반 그룹:</b> {{ "활성화" if group.is_school_group else "미활성화" }}{% if group.school_group_request_status == "pending" %} <span class="hint">(승인 대기 중)</span>{% elif group.school_group_request_status == "rejected" %} <span class="hint">(최근 신청 거절)</span>{% endif %}</p>
+    {% if can_manage %}
+    <details class="sub-box">
+        <summary>그룹 설명 / 공개 여부 수정</summary>
+        <form action="/groups/{{ group.id }}/edit-description" method="post">
+            <textarea name="description" class="short-textarea">{{ group.description }}</textarea>
+            <button type="submit">설명 저장</button>
+        </form>
+        <form action="/groups/{{ group.id }}/visibility" method="post" class="inline-form">
+            <label><input type="checkbox" name="is_public" {% if group.is_public %}checked{% endif %}> 공개 그룹으로 설정</label>
+            <p class="hint">공개 그룹도 가입 신청 후 관리자의 승인/거절을 거쳐 가입됩니다. 비공개 그룹은 초대받은 사용자만 가입할 수 있습니다.</p>
+            <button type="submit">공개 여부 저장</button>
+        </form>
+    </details>
+    {% if user and user.is_admin and group.is_school_group %}
+    <form action="/admin/groups/{{ group.id }}/school-group/disable" method="post" class="inline-form" onsubmit="return confirm('학교 분반 그룹 설정을 해제할까요?');">
+        <button type="submit" class="secondary">학교 분반 그룹 해제</button>
+    </form>
+    {% endif %}
+    <details class="sub-box">
+        <summary>그룹 알림 발송</summary>
+        <p class="hint">그룹 회원의 메세지함으로 알림을 보내고, 필요하면 그룹 공지에도 함께 등록할 수 있습니다.</p>
+        <form action="/groups/{{ group.id }}/notifications/send" method="post">
+            <label>제목</label>
+            <input name="title" required placeholder="예: 이번 주 연습 안내">
+            <label>내용</label>
+            <textarea name="content" class="short-textarea"></textarea>
+            <label><input type="checkbox" name="create_board_notice"> 그룹 공지 게시글로도 등록</label>
+            <label><input type="checkbox" name="pin_notice"> 공지 상단 고정</label>
+            <button type="submit">그룹 알림 발송</button>
+        </form>
+    </details>
+    {% if can_manage_members and not group.is_school_group %}
+    <details class="sub-box">
+        <summary>학교 분반 그룹 신청</summary>
+        <p class="hint">학교 분반 그룹으로 승인되면 시험 모드 그룹 대회 진행 중 학생은 해당 시험 외 다른 그룹/문제/대회로 이동할 수 없습니다.</p>
+        <form action="/groups/{{ group.id }}/school-group/apply" method="post" enctype="multipart/form-data">
+            <label>신청 사유</label>
+            <textarea name="reason" class="short-textarea" placeholder="예: 1학년 정보 수행평가 분반 운영용">{{ group.school_group_request_reason }}</textarea>
+            <label>증빙 파일</label><input type="file" name="attachment">
+            <p class="hint">수업 계획서, 분반 명단, 담당자 확인 자료 등을 첨부할 수 있습니다.</p>
+            {% if group.school_group_request_file_path %}<p class="hint">현재 첨부: <a href="{{ group.school_group_request_file_path }}" target="_blank">{{ group.school_group_request_file_name or '첨부파일' }}</a></p>{% endif %}
+            <button type="submit">신청하기</button>
+        </form>
+    </details>
+    {% endif %}
+    {% endif %}
+    {% if user %}
+        {% if membership %}
+            <p class="hint">현재 이 그룹의 {{ membership.role }}입니다.</p>
+            {% if membership.role != "owner" %}
+            <form action="/groups/{{ group.id }}/leave" method="post"><button type="submit">그룹 탈퇴</button></form>
+            {% endif %}
+        {% elif group.is_public %}
+            {% if pending_request %}
+                <p class="hint">가입 신청이 승인 대기 중입니다.</p>
+            {% else %}
+                <form action="/groups/{{ group.id }}/join" method="post"><button type="submit">가입 신청</button></form>
+            {% endif %}
+        {% else %}
+            <p class="hint">비공개 그룹은 초대를 통해서만 가입할 수 있습니다.</p>
+        {% endif %}
+    {% else %}
+        <p>그룹에 가입하려면 로그인해야 합니다.</p>
+    {% endif %}
+</section>
+
+<div class="tabs">
+    <button type="button" class="tab-button active" data-tab="overview">{% if can_manage %}회원/관리{% else %}회원{% endif %}</button>
+    {% if membership or can_manage %}
+    <button type="button" class="tab-button" data-tab="problemsets">문제집</button>
+    <button type="button" class="tab-button" data-tab="contests">그룹 대회</button>
+    <button type="button" class="tab-button" data-tab="practice">연습</button>
+    <button type="button" class="tab-button" data-tab="board">그룹 게시판</button>
+    {% endif %}
+</div>
+
+<section id="overview" class="box tab-panel active">
+    <h3>회원/관리</h3>
+
+    <details class="sub-box" open>
+        <summary>회원 목록 / 일괄 관리</summary>
+        <div class="inline-toolbar member-filter-toolbar">
+            <input type="text" id="groupMemberSearch" placeholder="아이디, 이름, 학번 검색" oninput="filterGroupMembers()">
+            <select id="groupFullNameFilter" onchange="filterGroupMembers()">
+                <option value="all">이름 전체</option>
+                <option value="present">이름 있음</option>
+                <option value="missing">이름 없음</option>
+            </select>
+            <select id="groupStudentIdFilter" onchange="filterGroupMembers()">
+                <option value="all">학번 전체</option>
+                <option value="present">학번 있음</option>
+                <option value="missing">학번 없음</option>
+            </select>
+            {% if can_manage %}<a class="button secondary" href="/groups/{{ group.id }}/members.csv">회원 CSV 다운로드</a>{% endif %}
+        </div>
+        {% if can_manage %}<form id="memberBulkForm" method="post"></form>{% endif %}
+        <table id="groupMemberTable">
+            <thead><tr>{% if can_manage %}<th>선택</th>{% endif %}<th>아이디</th><th>이름</th><th>학번</th><th>역할</th><th>가입일</th>{% if can_manage_members %}<th>개별 권한</th>{% endif %}</tr></thead>
+            <tbody>
+                {% for member in group.members|sort(attribute='user.username') %}
+                <tr class="group-member-row" data-username="{{ (member.user.username if member.user else member.user_id)|string|lower }}" data-full-name="{{ (member.user.full_name if member.user else '')|lower }}" data-student-id="{{ (member.user.student_id if member.user else '')|lower }}" data-has-full-name="{{ '1' if member.user and member.user.full_name else '0' }}" data-has-student-id="{{ '1' if member.user and member.user.student_id else '0' }}">
+                    {% if can_manage %}<td>{% if member.user_id != group.owner_id %}<input type="checkbox" name="member_ids" value="{{ member.user_id }}" form="memberBulkForm">{% endif %}</td>{% endif %}
+                    <td>{{ member.user.username if member.user else member.user_id }}</td>
+                    <td>{{ member.user.full_name if member.user else '-' }}</td>
+                    <td>{{ member.user.student_id if member.user else '-' }}</td>
+                    <td>{{ "소유자" if member.role == "owner" else ("관리자" if member.role == "admin" else "회원") }}</td>
+                    <td>{{ member.joined_at }}</td>
+                    {% if can_manage_members %}
+                    <td>
+                        {% if member.user_id != group.owner_id %}
+                        <form action="/groups/{{ group.id }}/members/{{ member.user_id }}/role" method="post" class="inline-form">
+                            <select name="role">
+                                <option value="member" {% if member.role == "member" %}selected{% endif %}>회원</option>
+                                <option value="admin" {% if member.role == "admin" %}selected{% endif %}>그룹 관리자</option>
+                            </select>
+                            <button type="submit">저장</button>
+                        </form>
+                        {% else %}-{% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="{% if can_manage %}7{% else %}5{% endif %}">회원이 없습니다.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if can_manage %}
+        <div class="inline-toolbar bulk-actions">
+            <button type="button" onclick="selectFilteredGroupMembers(true)">필터 결과 전체 선택</button>
+            <button type="button" onclick="selectFilteredGroupMembers(false)">필터 결과 선택 해제</button>
+            <span class="hint" id="groupMemberFilterCount"></span>
+            <select name="role" form="memberBulkForm">
+                <option value="member">회원으로 변경</option>
+                <option value="admin">그룹 관리자로 변경</option>
+            </select>
+            <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-role" onclick="return confirm('선택한 회원의 역할을 변경할까요?');">선택 역할 변경</button>
+            <input type="text" name="new_password" form="memberBulkForm" value="changeme1234" placeholder="초기화 비밀번호">
+            <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
+            <button type="submit" class="danger-button" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-delete" onclick="return confirm('선택한 회원을 그룹에서 제거할까요?');">선택 회원 제거</button>
+        </div>
+        {% endif %}
+    </details>
+
+    {% if can_manage %}
+    <details class="sub-box">
+        <summary>초대 / CSV 일괄 추가</summary>
+        <form action="/groups/{{ group.id }}/invite" method="post">
+            <label>초대할 사용자 아이디</label>
+            <input type="text" name="username" required>
+            <button type="submit">초대 메세지 보내기</button>
+        </form>
+        <hr>
+        <p class="hint">첫 줄은 username 형식입니다. 이미 존재하는 회원만 그룹에 추가합니다.</p>
+        <form action="/groups/{{ group.id }}/members/bulk-add" method="post" enctype="multipart/form-data">
+            <input type="file" name="csv_file" accept=".csv,text/csv">
+            <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
+            <textarea name="csv_text" class="short-code-textarea" placeholder="username
+student01
+student02"></textarea>
+            <button type="submit">기존 회원 일괄 추가</button>
+        </form>
+        {% if group.is_school_group %}
+        <hr>
+        <p class="hint">학교 분반 그룹에서는 그룹 소유자/관리자/OJ 관리자가 계정을 생성하면서 그룹에 일괄 추가할 수 있습니다.</p>
+        <form action="/groups/{{ group.id }}/members/bulk-create" method="post" enctype="multipart/form-data">
+            <input type="file" name="csv_file" accept=".csv,text/csv">
+            <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
+            <textarea name="csv_text" class="short-code-textarea" placeholder="username,password,full_name,student_id
+student01,1234,홍길동,10101"></textarea>
+            <button type="submit">계정 생성 후 그룹 추가</button>
+        </form>
+        {% endif %}
+    </details>
+
+    <details class="sub-box">
+        <summary>가입 신청 관리</summary>
+        {% for req in join_requests %}
+        <div class="question-card">
+            <p>{{ req.user.username if req.user else req.user_id }} / {{ req.created_at }}</p>
+            <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/approve" method="post"><button type="submit">승인</button></form>
+            <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/reject" method="post"><button type="submit">거절</button></form>
+        </div>
+        {% else %}
+        <p class="hint">대기 중인 가입 신청이 없습니다.</p>
+        {% endfor %}
+    </details>
+
+    <details class="sub-box">
+        <summary>그룹 관리</summary>
+        <form action="/groups/{{ group.id }}/transfer-owner" method="post">
+            <label>소유권을 양도할 회원 아이디</label>
+            <input type="text" name="username" required placeholder="현재 그룹 회원 아이디">
+            <button type="submit" onclick="return confirm('이 회원에게 그룹 소유권을 양도할까요?');">소유권 양도</button>
+        </form>
+        <form action="/groups/{{ group.id }}/delete" method="post" onsubmit="return confirm('정말 이 그룹을 삭제할까요? 그룹 문제집/대회/연습 틀과 가입 신청, 관련 메세지도 함께 삭제됩니다.');">
+            <button type="submit" class="danger-button">그룹 삭제</button>
+        </form>
+    </details>
+    {% endif %}
+</section>
+
+{% if membership or can_manage %}
+<section id="problemsets" class="box tab-panel">
+    <h3>그룹 문제집</h3>
+    {% if can_manage %}
+    <details class="sub-box">
+        <summary>문제집 만들기</summary>
+        <form action="/groups/{{ group.id }}/problemsets/new" method="post">
+            <label>제목</label><input type="text" name="title" required>
+            <label>설명</label><textarea name="description" class="short-textarea"></textarea>
+            <button type="submit">문제집 추가</button>
+        </form>
+    </details>
+    {% endif %}
+    {% for item in problem_sets %}
+    <details class="question-card">
+        <summary><b>{{ item.title }}</b> — 문제 {{ problem_set_items.get(item.id, [])|length }}개</summary>
+        {{ item.description|rich_text }}
+        {% if can_manage %}
+        <form action="/groups/{{ group.id }}/problemsets/{{ item.id }}/edit-description" method="post" class="inline-form">
+            <label>설명 수정</label>
+            <textarea name="description" class="short-textarea">{{ item.description }}</textarea>
+            <button type="submit">저장</button>
+        </form>
+        {% endif %}
+        <table>
+            <thead><tr><th>순서</th><th>번호</th><th>제목</th><th>관리</th></tr></thead>
+            <tbody>
+            {% for ps_item in problem_set_items.get(item.id, []) %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ ps_item.problem_id }}</td>
+                    <td><a href="/problems/{{ ps_item.problem_id }}">{{ ps_item.problem.title if ps_item.problem else '-' }}</a></td>
+                    <td>{% if can_manage %}<form class="inline-actions" action="/groups/{{ group.id }}/problemsets/{{ item.id }}/items/{{ ps_item.id }}/delete" method="post"><button type="submit">제거</button></form>{% else %}-{% endif %}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="4">아직 연결된 문제가 없습니다.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% if can_manage %}
+        <form action="/groups/{{ group.id }}/problemsets/{{ item.id }}/add-problem" method="post" class="inline-form">
+            <label>문제 번호 직접 추가</label>
+            <input type="text" name="problem_ids" placeholder="예: 1000, 1001, 1002" required>
+            <button type="submit">추가</button>
+        </form>
+        <form action="/groups/{{ group.id }}/problemsets/{{ item.id }}/reorder" method="post" class="inline-form">
+            <label>문제 배치 순서</label>
+            <input type="text" name="ordered_problem_ids" value="{% for ps_item in problem_set_items.get(item.id, []) %}{{ ps_item.problem_id }}{% if not loop.last %}, {% endif %}{% endfor %}">
+            <button type="submit">순서 저장</button>
+        </form>
+        {% endif %}
+    </details>
+    {% else %}<p class="hint">아직 문제집이 없습니다.</p>{% endfor %}
+</section>
+
+<section id="contests" class="box tab-panel">
+    <h3>그룹 대회</h3>
+    {% if can_manage %}
+    <details class="sub-box">
+        <summary>그룹 대회 개최하기</summary>
+        <form action="/groups/{{ group.id }}/contests/new" method="post">
+            <label>제목</label><input type="text" name="title" required>
+            <label>설명</label><textarea name="description" class="short-textarea"></textarea>
+            <label>시작 시각</label><input type="datetime-local" name="start_time" value="{{ default_start }}">
+            <label>종료 시각</label><input type="datetime-local" name="end_time" value="{{ default_end }}">
+            <label>초기 문제 번호</label><input type="text" name="problem_order" placeholder="선택 사항: 1001, 1000, 1002">
+            <h4>공개/시험 설정</h4>
+            <label><input type="checkbox" name="is_public" checked> 그룹 회원에게 공개</label>
+            {% if group.is_school_group and group.school_group_request_status == "approved" %}
+            <label><input type="checkbox" name="is_exam_mode"> 시험 모드 사용 <span class="hint">(학교 분반 승인 그룹 전용, 생성 후 변경 불가)</span></label>
+            {% else %}
+            <p class="hint">시험 모드는 학교 분반 그룹 승인이 완료된 그룹에서만 사용할 수 있습니다.</p>
+            {% endif %}
+            <label><input type="checkbox" name="hide_ranking"> 순위표 숨김</label>
+            <label><input type="checkbox" name="score_enabled"> 문제별 배점 기능 사용</label>
+            <p class="hint">배점 기능을 켜면 문제별 점수 입력과 점수표 기능을 사용할 수 있습니다.</p>
+            <p class="hint">상세 채점 메시지는 관리자에게만 보이고, 일반 참가자는 실행시간과 메모리만 확인할 수 있습니다.</p>
+            <p class="hint">비워두면 문제 없는 그룹 대회가 먼저 생성됩니다. 생성 후 대회 상세 화면에서 기존 문제를 추가할 수 있습니다.</p>
+            <p class="hint">그룹 대회는 메인 대회 목록에 노출되지 않고, 이 그룹 회원만 접근/제출할 수 있습니다.</p>
+            <button type="submit">그룹 대회 개최</button>
+        </form>
+    </details>
+    {% endif %}
+    <table class="group-contest-table">
+        <thead><tr><th>번호</th><th>제목</th><th>설명</th><th>대회</th><th>관리</th></tr></thead>
+        <tbody>
+        {% for item in group_contests %}
+            <tr>
+                <td>G{{ item.display_number or loop.index }}</td>
+                <td>
+                    {{ item.title }}<br>
+                    {% if item.contest %}
+                    <span class="badge">{{ "공개" if item.contest.is_public else "비공개" }}</span>
+                    <span class="hint">{{ "시험 모드" if item.contest.is_exam_mode else "일반" }}</span>
+                    {% if item.contest.hide_ranking %}<span class="hint">순위표 숨김</span>{% endif %}
+                    {% endif %}
+                </td>
+                <td>
+                    {{ item.description|rich_text }}
+                    {% if can_manage %}
+                    <details>
+                        <summary>설명 수정</summary>
+                        <form action="/groups/{{ group.id }}/contests/{{ item.id }}/edit-description" method="post" class="inline-form">
+                            <textarea name="description" class="short-textarea">{{ item.description }}</textarea>
+                            <button type="submit">설명 저장</button>
+                        </form>
+                    </details>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if item.contest_id %}
+                    <a class="button secondary" href="/contests/{{ item.contest_id }}">입장</a>
+                    <span class="hint">문제 {{ group_contest_counts.get(item.id, 0) }}개</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td>
+                    {% if can_manage %}
+                    {% if item.contest %}
+                    <a class="button secondary" href="/admin/group-contests/{{ item.id }}/progress">현황</a>
+                    <form action="/groups/{{ group.id }}/contests/{{ item.id }}/visibility" method="post" class="inline-actions">
+                        <label><input type="checkbox" name="is_public" {% if item.contest.is_public %}checked{% endif %}> 공개</label>
+                        <button type="submit">저장</button>
+                    </form>
+                    {% endif %}
+                    <form action="/groups/{{ group.id }}/contests/{{ item.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 그룹 대회와 관련 제출/질문/에디토리얼을 삭제할까요?');">
+                        <button type="submit" class="danger">삭제</button>
+                    </form>
+                    {% else %}-{% endif %}
+                </td>
+            </tr>
+        {% else %}<tr><td colspan="5">아직 그룹 대회가 없습니다.</td></tr>{% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section id="practice" class="box tab-panel">
+    <h3>그룹 연습</h3>
+    {% if can_manage %}
+    <details class="sub-box">
+        <summary>그룹 연습 만들기</summary>
+        <form action="/groups/{{ group.id }}/practices/new" method="post">
+            <label>제목</label><input type="text" name="title" required>
+            <label>설명</label><textarea name="description" class="short-textarea"></textarea>
+            <label>시작 시각</label><input type="datetime-local" name="start_time" value="{{ default_start }}">
+            <label>종료 시각</label><input type="datetime-local" name="end_time" value="{{ default_end }}">
+            <label>초기 문제 번호</label><input type="text" name="problem_order" placeholder="선택 사항: 1000, 1001">
+            <p class="hint">비워두면 문제 없는 연습이 먼저 생성됩니다. 생성 후 연습 상세 화면에서 문제 번호를 직접 추가할 수 있습니다.</p>
+            <button type="submit">그룹 연습 추가</button>
+        </form>
+    </details>
+    {% endif %}
+    <table>
+        <thead><tr><th>제목</th><th>설명</th><th>기간</th><th>문제</th><th>상태</th><th>입장</th></tr></thead>
+        <tbody>
+        {% for item in practices %}
+        <tr>
+            <td>{{ item.title }}</td>
+            <td>{{ item.description|rich_text }}</td>
+            <td>{{ item.start_time if item.start_time else '제한 없음' }} ~ {{ item.end_time if item.end_time else '제한 없음' }}</td>
+            <td>{{ practice_items.get(item.id, [])|length }}개</td>
+            <td>{% if practice_is_closed(item) %}종료{% elif practice_is_open(item) %}진행 중{% else %}시작 전{% endif %}</td>
+            <td><a class="button secondary" href="/groups/{{ group.id }}/practices/{{ item.id }}">입장</a></td>
+        </tr>
+        {% else %}<tr><td colspan="6">아직 그룹 연습이 없습니다.</td></tr>{% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}
+
+<section id="board" class="box tab-panel">
+    <h3>그룹 게시판</h3>
+    {% if membership or can_manage %}
+    <details class="sub-box">
+        <summary>글쓰기</summary>
+        <form action="/groups/{{ group.id }}/board/new" method="post">
+            <label>분류</label>
+            <select name="board_type">
+                {% for key, label in GROUP_BOARD_WRITE_TYPES.items() %}
+                <option value="{{ key }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+            <label>제목</label><input type="text" name="title" required>
+            <label>내용</label><textarea name="content" class="short-code-textarea" required></textarea>
+            {% if can_manage %}<label><input type="checkbox" name="is_pinned"> 상단 고정</label>{% endif %}
+            <button type="submit">등록</button>
+        </form>
+    </details>
+    {% endif %}
+    <div class="board-tabs">
+        {% for key, label in GROUP_BOARD_TABS.items() %}
+        <a class="button {% if active_group_board_type == key %}{% else %}secondary{% endif %}" href="/groups/{{ group.id }}?board_type={{ key }}#board">{{ label }}</a>
+        {% endfor %}
+    </div>
+    <table>
+        <thead><tr><th>번호</th><th>분류</th><th>제목</th><th>작성자</th><th>작성일</th></tr></thead>
+        <tbody>
+        {% for post in group_posts %}
+        <tr class="{% if post.is_pinned %}pinned-row{% endif %}">
+            <td>{{ post.display_number or loop.index }}</td>
+            <td>{{ GROUP_BOARD_TYPES.get(post.board_type, post.board_type) }}</td>
+            <td><a href="/groups/{{ group.id }}/board/{{ post.id }}">{{ post.title }}</a></td>
+            <td>{{ post.author.username if post.author else '-' }}</td>
+            <td>{{ post.created_at }}</td>
+        </tr>
+        {% else %}<tr><td colspan="5">그룹 게시글이 없습니다.</td></tr>{% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<script>
+function groupMemberRowMatches(row) {
+    const keyword = document.getElementById("groupMemberSearch")?.value.trim().toLowerCase() || "";
+    const fullNameFilter = document.getElementById("groupFullNameFilter")?.value || "all";
+    const studentIdFilter = document.getElementById("groupStudentIdFilter")?.value || "all";
+    const haystack = [row.dataset.username, row.dataset.fullName, row.dataset.studentId].join(" ");
+    if (keyword && !haystack.includes(keyword)) return false;
+    if (fullNameFilter === "present" && row.dataset.hasFullName !== "1") return false;
+    if (fullNameFilter === "missing" && row.dataset.hasFullName === "1") return false;
+    if (studentIdFilter === "present" && row.dataset.hasStudentId !== "1") return false;
+    if (studentIdFilter === "missing" && row.dataset.hasStudentId === "1") return false;
+    return true;
+}
+function filterGroupMembers() {
+    let visible = 0;
+    document.querySelectorAll(".group-member-row").forEach(row => {
+        const matched = groupMemberRowMatches(row);
+        row.style.display = matched ? "" : "none";
+        if (matched) visible += 1;
+    });
+    const counter = document.getElementById("groupMemberFilterCount");
+    if (counter) counter.textContent = `필터 결과 ${visible}명`;
+}
+function selectFilteredGroupMembers(checked) {
+    document.querySelectorAll(".group-member-row").forEach(row => {
+        if (groupMemberRowMatches(row)) {
+            const box = row.querySelector("input[type='checkbox'][name='member_ids']");
+            if (box) box.checked = checked;
+        }
+    });
+}
+(function () {
+    const buttons = document.querySelectorAll('.tab-button');
+    const panels = document.querySelectorAll('.tab-panel');
+    function activate(tab) {
+        buttons.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tab));
+        panels.forEach(panel => panel.classList.toggle('active', panel.id === tab));
+    }
+    buttons.forEach(btn => btn.addEventListener('click', function () {
+        activate(this.dataset.tab);
+        history.replaceState(null, '', '#' + this.dataset.tab);
+    }));
+    const initial = location.hash ? location.hash.substring(1) : 'overview';
+    if (document.getElementById(initial)) activate(initial);
+    filterGroupMembers();
+})();
+</script>
+{% endblock %}

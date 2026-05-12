@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>그룹 만들기</h2>
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+<form action="/groups/new" method="post" class="box small-form">
+    <label>그룹명</label>
+    <input type="text" name="name" required>
+    <label>설명</label>
+    <textarea name="description"></textarea>
+    <label><input type="checkbox" name="is_public" checked> 공개 그룹</label>
+    <button type="submit">그룹 생성</button>
+</form>
+{% endblock %}

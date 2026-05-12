@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="profile-hero box" {% if target.profile_background_url %}style="background-image: linear-gradient(rgba(0,0,0,.45), rgba(0,0,0,.45)), url('{{ target.profile_background_url }}');"{% endif %}>
+    <h2>{{ target.username }}님의 프로필</h2>
+    {% if target.full_name or target.student_id %}<p>{% if target.full_name %}<b>이름:</b> {{ target.full_name }} {% endif %}{% if target.student_id %}<b>학번:</b> {{ target.student_id }}{% endif %}</p>{% endif %}
+    <p><b>가입일:</b> {{ target.created_at }}</p>
+    <div class="stats-grid">
+        <div><b>{{ solved_ids|length }}</b><span>푼 문제</span></div>
+        <div><b>{{ tried_ids|length }}</b><span>시도한 문제</span></div>
+        <div><b>{{ tried_only_ids|length }}</b><span>아직 못 푼 문제</span></div>
+        <div><b>{{ ac_count }}</b><span>AC 제출</span></div>
+        <div><b>{{ wrong_count }}</b><span>오답/에러 제출</span></div>
+    </div>
+</section>
+
+{% if user and (user.id == target.id or user.is_admin) %}
+<section class="box">
+    <h3>프로필 배경 실험 기능</h3>
+    <p class="hint">이미지 URL을 넣으면 프로필 상단 배경으로 표시됩니다. 비워두면 기본 배경으로 돌아갑니다.</p>
+    <form action="/users/{{ target.username }}/profile-background" method="post">
+        <label>배경 이미지 URL</label>
+        <input type="text" name="profile_background_url" value="{{ target.profile_background_url }}" placeholder="https://...">
+        <button type="submit">배경 저장</button>
+    </form>
+</section>
+{% endif %}
+
+<section class="box">
+    <h3>결과별 제출 통계</h3>
+    <table>
+        <thead><tr><th>결과</th><th>제출 수</th></tr></thead>
+        <tbody>
+        {% for result, count in result_rows %}
+            <tr><td class="result {{ result }}">{{ result_label(result) }}</td><td>{{ count }}</td></tr>
+        {% else %}
+            <tr><td colspan="2">제출이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>푼 문제</h3>
+    {% if solved_ids %}
+    <p>{% for pid in solved_ids %}<a class="tag" href="/problems/{{ pid }}">{{ pid }}</a> {% endfor %}</p>
+    {% else %}<p class="hint">아직 맞은 문제가 없습니다.</p>{% endif %}
+</section>
+
+<section class="box">
+    <h3>시도했지만 아직 못 푼 문제</h3>
+    {% if tried_only_ids %}
+    <p>{% for pid in tried_only_ids %}<a class="tag" href="/problems/{{ pid }}">{{ pid }}</a> {% endfor %}</p>
+    {% else %}<p class="hint">시도했지만 아직 못 푼 문제가 없습니다.</p>{% endif %}
+</section>
+
+<section class="box">
+    <h3>최근 일반 제출</h3>
+    <table>
+        <thead><tr><th>#</th><th>문제</th><th>결과</th><th>시간</th></tr></thead>
+        <tbody>
+        {% for s in recent %}
+            <tr><td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td><td>{{ s.problem_id }}</td><td class="result {{ s.result }}">{{ result_label(s.result) }}</td><td>{{ s.created_at }}</td></tr>
+        {% else %}
+            <tr><td colspan="4">제출이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

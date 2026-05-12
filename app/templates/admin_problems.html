@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>전체 문제 관리</h2>
+<div class="box">
+    <a class="button secondary" href="/admin">관리자 페이지로 돌아가기</a>
+    <a class="button" href="/admin/problems/new">일반 문제 추가</a>
+</div>
+
+<div class="box">
+    <h3>문제 검색</h3>
+    <form method="get" action="/admin/problems" class="filter-form horizontal-filter">
+        <div>
+            <label>문제 번호 / 임시 번호</label>
+            <input type="text" name="problem_id" value="{{ problem_id }}" placeholder="예: 1000 또는 G1-C2-A">
+        </div>
+        <div>
+            <label>키워드</label>
+            <input type="text" name="keyword" value="{{ keyword }}" placeholder="제목, 지문, 태그, 출처, 출제자">
+        </div>
+        <div>
+            <label>난이도</label>
+            <input type="text" name="difficulty" value="{{ difficulty }}" placeholder="예: Bronze, 쉬움, 중간">
+        </div>
+        <div>
+            <label>태그</label>
+            <input type="text" name="tag" value="{{ tag }}" placeholder="예: DP, 구현">
+        </div>
+        <div>
+            <label>출처</label>
+            <input type="text" name="source" value="{{ source }}" placeholder="예: 수행평가, 1학기">
+        </div>
+        <div>
+            <label>문제 등록 유형</label>
+            <select name="registration_type">
+                <option value="all" {% if registration_type == 'all' %}selected{% endif %}>전체</option>
+                <option value="regular" {% if registration_type == 'regular' %}selected{% endif %}>일반 문제</option>
+                <option value="contest_only" {% if registration_type == 'contest_only' %}selected{% endif %}>대회 전용 문제</option>
+                <option value="group_contest" {% if registration_type == 'group_contest' %}selected{% endif %}>그룹 대회 등록 문제</option>
+                <option value="review_pending" {% if registration_type == 'review_pending' %}selected{% endif %}>일반 공개 검토 요청</option>
+                <option value="public" {% if registration_type == 'public' %}selected{% endif %}>공개 문제</option>
+                <option value="private" {% if registration_type == 'private' %}selected{% endif %}>비공개 문제</option>
+                <option value="judge_ready" {% if registration_type == 'judge_ready' %}selected{% endif %}>제출 가능</option>
+                <option value="judge_not_ready" {% if registration_type == 'judge_not_ready' %}selected{% endif %}>채점 준비 중</option>
+            </select>
+        </div>
+        <div class="filter-actions">
+            <button type="submit">검색</button>
+            <a class="button secondary" href="/admin/problems">초기화</a>
+        </div>
+    </form>
+    <p class="hint">검색 결과 {{ total_count }}개 중 {{ problems|length }}개를 표시합니다. 한 페이지에는 {{ per_page }}개까지 표시됩니다.</p>
+</div>
+
+<div class="box">
+    <h3>검색 결과 일괄 작업</h3>
+    <form method="post" action="/admin/problems/bulk-rejudge" onsubmit="return confirm('현재 검색 조건에 해당하는 모든 문제의 제출을 재채점 큐에 넣을까요?');">
+        <input type="hidden" name="problem_id" value="{{ problem_id }}">
+        <input type="hidden" name="registration_type" value="{{ registration_type }}">
+        <input type="hidden" name="keyword" value="{{ keyword }}">
+        <input type="hidden" name="difficulty" value="{{ difficulty }}">
+        <input type="hidden" name="tag" value="{{ tag }}">
+        <input type="hidden" name="source" value="{{ source }}">
+        <button type="submit">검색 결과 전체 재채점</button>
+    </form>
+    <p class="hint">문제 수가 많으면 큐에 등록되는 데 시간이 걸릴 수 있습니다. 채점 진행 상황은 관리자 채점 큐에서 확인하세요.</p>
+</div>
+
+<div class="box">
+    <table>
+        <thead>
+            <tr>
+                <th>내부 번호</th>
+                <th>표시 번호</th>
+                <th>제목</th>
+                <th>난이도</th>
+                <th>태그</th>
+                <th>출처</th>
+                <th>등록 유형</th>
+                <th>공개/채점</th>
+                <th>검토 상태</th>
+                <th>관리</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for problem in problems %}
+        <tr>
+            <td>{{ problem.id }}</td>
+            <td>{{ problem.display_code or problem.id }}</td>
+            <td><a href="/problems/{{ problem.id }}">{{ problem.title }}</a></td>
+            <td>{{ problem.difficulty or '미지정' }}</td>
+            <td class="small-cell">{{ problem.tags or '-' }}</td>
+            <td class="small-cell">{{ problem.source or '-' }}</td>
+            <td>
+                {% if problem.origin_type == 'group_contest' %}
+                    <span class="badge">그룹 대회 등록</span>
+                {% elif problem.is_contest_only %}
+                    <span class="badge">대회 전용</span>
+                {% else %}
+                    일반 문제
+                {% endif %}
+            </td>
+            <td>
+                {% if problem.is_public %}<span class="badge">공개</span>{% else %}<span class="hint">비공개</span>{% endif %}
+                / {% if problem.is_judge_ready %}<span class="badge">제출 가능</span>{% else %}<span class="hint">준비 중</span>{% endif %}
+            </td>
+            <td>
+                {% if problem.review_status == 'review_pending' %}<span class="badge">검토 요청</span>
+                {% elif problem.review_status == 'rejected' %}<span class="hint">반려</span>
+                {% elif problem.review_status == 'approved' and problem.origin_type == 'group_contest' and problem.is_contest_only %}<span class="badge">승인됨</span>
+                {% else %}-{% endif %}
+            </td>
+            <td>
+                <a class="button secondary" href="/admin/problems/{{ problem.id }}/edit">수정</a>
+                <details class="inline-details">
+                    <summary class="button secondary">복제</summary>
+                    <form method="post" action="/admin/problems/{{ problem.id }}/copy" class="compact-form">
+                        <label>새 문제 번호</label>
+                        <input type="number" name="new_problem_id" required>
+                        <label>새 제목</label>
+                        <input type="text" name="title" placeholder="비우면 복사본 제목 사용">
+                        <button type="submit">복제 생성</button>
+                    </form>
+                </details>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10">조건에 맞는 문제가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="pagination">
+        {% set query_base = 'problem_id=' ~ problem_id ~ '&registration_type=' ~ registration_type ~ '&keyword=' ~ keyword ~ '&difficulty=' ~ difficulty ~ '&tag=' ~ tag ~ '&source=' ~ source %}
+        {% if page > 1 %}<a class="button secondary" href="/admin/problems?{{ query_base }}&page={{ page - 1 }}">이전</a>{% endif %}
+        <span class="hint">{{ page }} / {{ total_pages }} 페이지</span>
+        {% if page < total_pages %}<a class="button secondary" href="/admin/problems?{{ query_base }}&page={{ page + 1 }}">다음</a>{% endif %}
+    </div>
+</div>
+{% endblock %}

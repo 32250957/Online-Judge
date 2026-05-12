@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+    <h2>대회 목록</h2>
+    {% if user and user.is_admin %}<a class="button" href="/admin/contests/new">대회 개최</a>{% endif %}
+</div>
+<table>
+    <thead><tr><th>번호</th><th>대회명</th><th>상태</th><th>시작</th><th>종료</th><th>문제 수</th></tr></thead>
+    <tbody>
+        {% for contest in contests %}
+        <tr>
+            <td>{{ contest.display_number or contest.id }}</td>
+            <td><a href="/contests/{{ contest.id }}">{{ contest.title }}</a></td>
+            <td>{{ contest_status(contest) }}</td>
+            <td>{{ contest.start_time }}</td>
+            <td>{{ contest.end_time }}</td>
+            <td>{{ contest.problem_links|length }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

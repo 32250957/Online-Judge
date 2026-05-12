@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{% if only_mine %}내 제출 기록{% else %}전체 제출 기록{% endif %}</h2>
+<form method="get" class="box filter-form horizontal-filter">
+    <div>
+        <label>문제 번호</label>
+        <input type="text" name="problem_id" value="{{ filters.problem_id if filters else '' }}" placeholder="예: 1000">
+    </div>
+    {% if not only_mine %}
+    <div>
+        <label>사용자</label>
+        <input type="text" name="username" value="{{ filters.username if filters else '' }}" placeholder="아이디 일부">
+    </div>
+    {% endif %}
+    <div>
+        <label>언어</label>
+        <select name="language">
+            <option value="">전체</option>
+            {% for lang in language_options %}<option value="{{ lang }}" {% if filters and filters.language == lang %}selected{% endif %}>{{ language_label(lang) }}</option>{% endfor %}
+        </select>
+    </div>
+    <div>
+        <label>결과</label>
+        <select name="result">
+            <option value="">전체</option>
+            {% for r in result_options %}<option value="{{ r }}" {% if filters and filters.result == r %}selected{% endif %}>{{ result_label(r) }}</option>{% endfor %}
+        </select>
+    </div>
+    <div>
+        <label>범위</label>
+        <select name="contest_scope">
+            <option value="" {% if not filters or not filters.contest_scope %}selected{% endif %}>전체</option>
+            <option value="normal" {% if filters and filters.contest_scope == 'normal' %}selected{% endif %}>일반 제출</option>
+            <option value="contest" {% if filters and filters.contest_scope == 'contest' %}selected{% endif %}>대회 제출</option>
+            <option value="practice" {% if filters and filters.contest_scope == 'practice' %}selected{% endif %}>그룹 연습 제출</option>
+        </select>
+    </div>
+    <div>
+        <label>페이지 크기</label>
+        <select name="per_page">
+            {% for size in [25, 50, 100, 200] %}<option value="{{ size }}" {% if filters and filters.per_page == size %}selected{% endif %}>{{ size }}개</option>{% endfor %}
+        </select>
+    </div>
+    <div class="filter-actions">
+        <button type="submit">필터 적용</button>
+        <a class="button secondary" href="{{ '/my-submissions' if only_mine else '/submissions' }}">초기화</a>
+    </div>
+</form>
+<p class="hint">총 {{ total_count }}건 중 {{ page }} / {{ total_pages }} 페이지를 표시합니다.</p>
+<table>
+    <thead>
+        <tr>
+            <th>제출 번호</th><th>사용자</th><th>문제</th><th>언어</th><th>상태</th><th>결과</th><th>실행시간</th><th>메모리</th><th>시간</th>{% if user and user.is_admin %}<th>관리</th>{% endif %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in submissions %}
+        <tr data-submission-id="{{ s.id }}" data-live="{{ 1 if s.judge_status not in ['DONE', 'FAILED'] else 0 }}">
+            <td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td>
+            <td>{{ s.user.username if s.user else "-" }}</td>
+            <td>
+                {% if s.contest_id %}
+                    {% set link = get_contest_link(s) %}
+                    {% if link %}{{ link.label }}{% else %}{{ s.problem_id }}{% endif %}
+                {% else %}
+                    {{ s.problem_id }}
+                {% endif %}
+            </td>
+            <td>{{ language_label(s.language) }}</td>
+            <td class="judge-status">{{ s.judge_status }}</td>
+            <td class="result-cell result {{ s.result }}" data-result-code="{{ s.result }}">{{ result_label(s.result) }}</td>
+            <td><span class="runtime-ms">{{ s.runtime_ms }}</span> ms</td>
+            <td><span class="memory-kb">{{ s.memory_kb }}</span> KB</td>
+            <td>{{ s.created_at }}</td>
+            {% if user and user.is_admin %}<td><form action="/admin/submissions/{{ s.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 제출 기록을 삭제할까요?');"><button type="submit" class="danger">삭제</button></form></td>{% endif %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if total_pages > 1 %}
+<div class="pagination box">
+    {% if page > 1 %}<a class="button secondary" href="{{ request.url.include_query_params(page=page - 1) }}">이전</a>{% endif %}
+    <span class="hint">{{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}<a class="button secondary" href="{{ request.url.include_query_params(page=page + 1) }}">다음</a>{% endif %}
+</div>
+{% endif %}
+
+<script>
+const RESULT_LABELS = {AC: "맞았습니다!!", RE: "런타임 에러", CE: "컴파일 에러", TLE: "시간 초과", MLE: "메모리 초과", WA: "틀렸습니다", WAITING: "채점 대기", JUDGING: "채점 중", SE: "시스템 에러"};
+function resultLabel(code) { return RESULT_LABELS[code] || code || "채점 대기"; }
+async function refreshLiveSubmissionRows() {
+    const rows = Array.from(document.querySelectorAll('tr[data-live="1"]'));
+    if (rows.length === 0) return;
+    const ids = rows.map(row => row.dataset.submissionId).join(',');
+    try {
+        const response = await fetch(`/api/submissions/status-bulk?ids=${encodeURIComponent(ids)}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const byId = new Map((data.submissions || []).map(item => [String(item.id), item]));
+        for (const row of rows) {
+            const item = byId.get(String(row.dataset.submissionId));
+            if (!item) continue;
+            row.querySelector('.judge-status').textContent = item.judge_status;
+            const resultCell = row.querySelector('.result-cell');
+            resultCell.textContent = resultLabel(item.result || 'WAITING');
+            resultCell.className = `result-cell result ${item.result || ''}`;
+            row.querySelector('.runtime-ms').textContent = item.runtime_ms ?? 0;
+            row.querySelector('.memory-kb').textContent = item.memory_kb ?? 0;
+            if (item.done) row.dataset.live = "0";
+        }
+    } catch (e) {}
+}
+setInterval(refreshLiveSubmissionRows, 1500);
+refreshLiveSubmissionRows();
+</script>
+{% endblock %}

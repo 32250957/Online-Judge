@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+    <h2>문제 목록</h2>
+    {% if user and user.is_admin %}<a class="button" href="/admin/problems/new">일반 문제 추가</a>{% endif %}
+</div>
+<form method="get" class="box search-box">
+    <label>문제 검색</label>
+    <input type="text" name="q" value="{{ q }}" placeholder="문제 번호, 제목, 태그, 출처 검색">
+    <label>난이도</label>
+    <select name="difficulty">
+        <option value="">전체</option>
+        {% for d in difficulties %}
+        <option value="{{ d }}" {% if difficulty == d %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+    </select>
+    <label>태그</label>
+    <input type="text" name="tag" value="{{ tag }}" placeholder="예: 구현, DP">
+    <button type="submit">검색</button>
+    <a class="button secondary" href="/problems">초기화</a>
+</form>
+<table>
+    <thead><tr><th>번호</th><th>제목</th><th>난이도</th><th>태그</th><th>관리</th></tr></thead>
+    <tbody>
+        {% for problem in problems %}
+        <tr>
+            <td>{{ problem.id }}</td>
+            <td><a href="/problems/{{ problem.id }}">{{ problem.title }}</a></td>
+            <td>{{ problem.difficulty }}</td>
+            <td>{{ problem.tags if problem.tags else '-' }}</td>
+            <td>{% if user and user.is_admin %}<a href="/admin/problems/{{ problem.id }}/edit">수정</a>
+                <form action="/admin/problems/{{ problem.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('문제 {{ problem.id }}번과 관련 제출/대회 연결/연습 연결을 삭제할까요?');"><button type="submit" class="danger">삭제</button></form>{% else %}-{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">조건에 맞는 문제가 없습니다.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

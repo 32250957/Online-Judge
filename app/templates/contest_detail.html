@@ -1,0 +1,342 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ contest.title }} {% if contest.is_exam_mode %}<span class="badge danger-badge">시험/평가 모드</span>{% endif %}</h2>
+<div class="box">
+    {{ contest.description|rich_text }}
+    <p><b>시작:</b> {{ contest.start_time }}</p>
+    <p><b>종료:</b> {{ contest.end_time }}</p>
+    <p><b>상태:</b> {{ contest_status(contest) }}</p>
+    {% if contest.is_exam_mode %}
+    <div class="notice-box exam-notice">
+        <b>시험/평가 모드 안내</b>
+        <p>제출 코드는 자동으로 비공개 처리되며, 순위표와 질문 기능은 일반 참가자에게 공개되지 않습니다.</p>
+        {% if contest_started and not contest_closed %}<p>시험이 시작된 뒤에는 문제 추가, 삭제, 순서 변경이 제한됩니다.</p>{% endif %}
+    </div>
+    {% endif %}
+    {% if user and user.is_admin %}
+    <p><b>운영 모드:</b> {% if contest.is_exam_mode %}시험/평가 모드{% else %}일반 대회{% endif %}</p>
+    <p><b>순위표:</b> {% if contest.hide_ranking %}일반 참가자에게 숨김{% else %}공개{% endif %}</p>
+    <p><b>공개 여부:</b> {% if contest.is_public %}공개{% else %}비공개{% endif %}</p>
+    {% endif %}
+    <p><b>남은 시간:</b> <span id="timer"></span></p>
+    {% if contest_closed and user and user.is_admin %}
+    <p class="hint">대회가 종료되어 질문 등록, 문제 추가, 문제 순서 변경이 비활성화되었습니다.</p>
+    {% endif %}
+    {% if can_manage_contest %}
+    <div class="inline-toolbar">
+        <a class="button" href="/admin/contests/{{ contest.id }}/ranking.csv">순위 CSV</a>
+        {% if contest.score_enabled %}<a class="button" href="/admin/contests/{{ contest.id }}/scores">점수표 보기</a>
+        <a class="button" href="/admin/contests/{{ contest.id }}/scores.csv">점수표 CSV</a>{% endif %}
+        <a class="button" href="/admin/contests/{{ contest.id }}/submissions.csv">제출 CSV</a>
+        <a class="button" href="/admin/contests/{{ contest.id }}/final-codes.zip">최종 코드 ZIP</a>
+        <form action="/admin/contests/{{ contest.id }}/rejudge" method="post" onsubmit="return confirm('이 대회 제출 전체를 재채점할까요?');"><button type="submit">대회 전체 재채점</button></form>
+    </div>
+    {% endif %}
+    {% if can_manage_contest %}
+    <details class="sub-box">
+        <summary>대회 설정</summary>
+        <form action="/admin/contests/{{ contest.id }}/settings" method="post">
+            {% if group_contest %}
+            <p class="hint">그룹 대회의 시험 모드는 생성 시에만 결정됩니다.</p>
+            <label><input type="checkbox" name="is_public" {% if contest.is_public %}checked{% endif %}> 그룹 회원에게 공개</label>
+            <label><input type="checkbox" name="hide_ranking" {% if contest.hide_ranking %}checked{% endif %}> 일반 참가자에게 순위표 숨김</label>
+            <label><input type="checkbox" name="score_enabled" {% if contest.score_enabled %}checked{% endif %}> 문제별 배점 기능 사용</label>
+            {% else %}
+            <label><input type="checkbox" name="is_exam_mode" {% if contest.is_exam_mode %}checked{% endif %}> 시험 모드 사용</label>
+            <label><input type="checkbox" name="hide_ranking" {% if contest.hide_ranking %}checked{% endif %}> 일반 참가자에게 순위표 숨김</label>
+            <label><input type="checkbox" name="score_enabled" {% if contest.score_enabled %}checked{% endif %}> 문제별 배점 기능 사용</label>
+            {% endif %}
+            {% if can_manage_contest and not contest_started and not contest_closed %}
+            <hr>
+            <h4>시간 수정</h4>
+            <p class="hint">대회 시작 전까지만 시작/종료 시간을 수정할 수 있습니다.</p>
+            <label>시작 시간</label><input type="datetime-local" name="start_time" value="{{ contest.start_time.strftime('%Y-%m-%dT%H:%M') if contest.start_time else '' }}">
+            <label>종료 시간</label><input type="datetime-local" name="end_time" value="{{ contest.end_time.strftime('%Y-%m-%dT%H:%M') if contest.end_time else '' }}">
+            {% endif %}
+            <p class="hint">상세 채점 메시지는 관리자에게만 보이고, 일반 참가자는 실행시간과 메모리만 확인할 수 있습니다.</p>
+            <button type="submit">설정 저장</button>
+        </form>
+    </details>
+    {% endif %}
+    {% if can_manage_contest and contest_status(contest) == "진행 중" %}
+    <form action="/admin/contests/{{ contest.id }}/end" method="post">
+        <button type="submit">대회 즉시 종료</button>
+    </form>
+    {% endif %}
+</div>
+<script>
+const serverNowAtLoad = Number({{ server_now_ms }});
+const browserNowAtLoad = Date.now();
+const startTime = Number({{ contest_start_ms }});
+const endTime = Number({{ contest_end_ms }});
+const manuallyEnded = {{ "true" if contest.is_ended else "false" }};
+function formatDuration(diff) {
+    const h = Math.floor(diff / 1000 / 60 / 60);
+    const m = Math.floor(diff / 1000 / 60) % 60;
+    const s = Math.floor(diff / 1000) % 60;
+    return `${h}시간 ${m}분 ${s}초`;
+}
+function updateTimer() {
+    const timer = document.getElementById("timer");
+    const nowMs = serverNowAtLoad + (Date.now() - browserNowAtLoad);
+    if (manuallyEnded || nowMs > endTime) {
+        timer.textContent = "대회 종료";
+        return;
+    }
+    if (nowMs < startTime) {
+        timer.textContent = `시작까지 ${formatDuration(startTime - nowMs)}`;
+        return;
+    }
+    timer.textContent = `종료까지 ${formatDuration(endTime - nowMs)}`;
+}
+function openTab(tabName) {
+    document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.remove("active"));
+    document.querySelectorAll(".tab-button").forEach(button => button.classList.remove("active"));
+    document.getElementById(tabName).classList.add("active");
+    document.querySelector(`[data-tab='${tabName}']`).classList.add("active");
+    if (history.replaceState) history.replaceState(null, "", `#${tabName}`);
+}
+window.addEventListener("DOMContentLoaded", () => {
+    updateTimer(); setInterval(updateTimer, 1000);
+    const target = location.hash ? location.hash.substring(1) : "problems";
+    if (document.getElementById(target)) openTab(target);
+});
+</script>
+
+<div class="tabs">
+    <button type="button" class="tab-button active" data-tab="problems" onclick="openTab('problems')">문제</button>
+    {% if ranking_visible %}<button type="button" class="tab-button" data-tab="ranking" onclick="openTab('ranking')">현재 순위</button>{% endif %}
+    {% if not contest.is_exam_mode or can_manage_contest %}<button type="button" class="tab-button" data-tab="questions" onclick="openTab('questions')">질문</button>{% endif %}
+    {% if editorial_visible %}<button type="button" class="tab-button" data-tab="editorials" onclick="openTab('editorials')">에디토리얼</button>{% endif %}
+    {% if can_manage_contest and not (contest.is_exam_mode and contest_started and not user.is_admin) %}
+    <button type="button" class="tab-button" data-tab="add-problem" onclick="openTab('add-problem')">문제 추가</button>
+    {% endif %}
+</div>
+
+<section id="problems" class="tab-panel active box">
+    <h3>대회 문제</h3>
+    {% if not problem_list_visible %}
+    <p class="hint">대회 시작 전에는 문제 목록을 볼 수 없습니다.</p>
+    {% else %}
+    <table class="contest-problem-table">
+        <thead><tr><th>번호</th><th>제목</th>{% if contest.score_enabled %}<th>배점</th>{% endif %}<th>내 제출 횟수</th><th>순위 반영</th><th>관리</th></tr></thead>
+        <tbody>
+            {% for item in stats %}
+            <tr>
+                <td>{{ item.link.label }}{% if item.problem.display_code %}<br><span class="hint">{{ item.problem.display_code }}</span>{% endif %}</td>
+                <td><a href="/contests/{{ contest.id }}/problems/{{ item.link.label }}">{{ item.problem.title }}</a>{% if item.problem.review_status == "review_pending" %}<br><span class="badge">공개 검토 요청 중</span>{% elif item.problem.review_status == "rejected" %}<br><span class="hint">공개 반려</span>{% endif %}</td>
+                {% if contest.score_enabled %}<td>{{ item.link.score }}</td>{% endif %}
+                <td>{{ item.total }}</td>
+                <td>{% if item.link.exclude_from_ranking %}제외{% else %}반영{% endif %}</td>
+                <td>{% if can_manage_contest %}{% if user and (user.is_admin or (group_contest and item.problem.origin_type == "group_contest")) %}<a href="/admin/problems/{{ item.problem.id }}/edit">문제 수정</a>{% endif %}
+                    {% if group_contest and item.problem.origin_type == "group_contest" and item.problem.review_status not in ["review_pending", "approved"] %}
+                    <form action="/groups/{{ group_contest.group_id }}/problems/{{ item.problem.id }}/request-public-review" method="post" class="inline-actions" onsubmit="return confirm('이 문제를 OJ 일반 공개 문제 검토 대상으로 요청할까요?');">
+                        <button type="submit">일반 공개 검토 요청</button>
+                    </form>
+                    {% endif %}
+                    {% if user and user.is_admin and item.problem.origin_type == "group_contest" and item.problem.review_status == "review_pending" %}
+                    <form action="/admin/problems/{{ item.problem.id }}/approve-public" method="post" class="inline-actions" onsubmit="return confirm('이 문제를 일반 문제로 공개할까요?');">
+                        <button type="submit">일반 공개 승인</button>
+                    </form>
+                    <form action="/admin/problems/{{ item.problem.id }}/reject-public" method="post" class="inline-actions">
+                        <button type="submit">공개 반려</button>
+                    </form>
+                    {% endif %}
+                    {% if contest.score_enabled %}<form action="/admin/contests/{{ contest.id }}/problems/{{ item.problem.id }}/score" method="post" class="inline-actions">
+                        <input type="number" name="score" value="{{ item.link.score }}" min="0" max="100000" class="mini-input">
+                        <button type="submit">배점 저장</button>
+                    </form>{% endif %}
+                    <form action="/admin/contests/{{ contest.id }}/problems/{{ item.problem.id }}/toggle-ranking" method="post" class="inline-actions">
+                        <button type="submit">{% if item.link.exclude_from_ranking %}순위 반영{% else %}순위 제외{% endif %}</button>
+                    </form>{% else %}-{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7">등록된 문제가 없습니다.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if can_manage_contest %}
+    <div class="box sub-box">
+        <h4>문제 순서 변경</h4>
+        {% if contest_closed %}
+        <p class="hint">종료된 대회에서는 문제 순서를 변경할 수 없습니다.</p>
+        {% elif contest.is_exam_mode and contest_started and not user.is_admin %}
+        <p class="hint">시험/평가 모드가 시작된 뒤에는 OJ 관리자만 문제 순서를 변경할 수 있습니다.</p>
+        {% else %}
+        <p class="hint">원하는 순서대로 원본 문제 ID를 쉼표 또는 줄바꿈으로 입력하세요. 저장하면 위에서부터 A, B, C...가 다시 붙습니다.</p>
+        <form action="/admin/contests/{{ contest.id }}/reorder-problems" method="post">
+            <textarea name="ordered_problem_ids" class="short-textarea">{% for item in stats %}{{ item.problem.id }}{% if not loop.last %}, {% endif %}{% endfor %}</textarea>
+            <button type="submit">순서 저장 / 라벨 재계산</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+</section>
+
+{% if ranking_visible %}<section id="ranking" class="tab-panel box">
+    <h3>현재 순위</h3>
+    <p class="hint">정렬 기준: 많이 맞은 순 → 오답 횟수 적은 순 → 실행시간 짧은 순 → 메모리 사용량 적은 순. 순위 제외로 설정한 문제는 맞은 개수와 오답 횟수 계산에서 제외됩니다.</p>
+    <table>
+        <thead><tr><th>순위</th><th>사용자</th><th>맞은 문제 수</th><th>오답 횟수</th><th>실행시간 합</th><th>메모리 합</th></tr></thead>
+        <tbody>
+            {% for row in rankings %}
+            <tr>
+                <td>{{ row.rank }}</td>
+                <td>{{ row.user.username if row.user else "-" }}</td>
+                <td>{{ row.solved_count }}</td>
+                <td>{{ row.wrong_count }}</td>
+                <td>{{ row.runtime_ms }} ms</td>
+                <td>{{ row.memory_kb }} KB</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6">아직 제출 기록이 없습니다.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>{% endif %}
+
+{% if not contest.is_exam_mode or can_manage_contest %}<section id="questions" class="tab-panel box">
+    <h3>대회 질문</h3>
+    {% if contest_closed %}
+    <p class="hint">종료된 대회입니다.</p>
+    {% elif user %}
+    <form action="/contests/{{ contest.id }}/questions/new" method="post">
+        <label>관련 문제</label>
+        <select name="problem_id">
+            <option value="">대회 전체</option>
+            {% if problem_list_visible %}{% for item in stats %}<option value="{{ item.problem.id }}">{{ item.link.label }} - {{ item.problem.title }}</option>{% endfor %}{% endif %}
+        </select>
+        <label>질문 내용</label>
+        <textarea name="content" required></textarea>
+        <button type="submit">질문 등록</button>
+    </form>
+    {% else %}<p>질문하려면 로그인해야 합니다.</p>{% endif %}
+
+    <h4>질문 목록</h4>
+    {% for q in questions %}
+    <div class="question-card">
+        <p><b>#{{ q.id }}</b> {{ q.user.username }} / {% if q.problem %}{{ q.problem.title }}{% else %}대회 전체{% endif %} / {{ q.created_at }} / {{ "공개" if q.is_public else "비공개" }}</p>
+        {{ q.content|rich_text }}
+        {% if q.answer %}<p><b>답변</b></p>{{ q.answer|rich_text }}{% else %}<p class="hint">아직 답변 없음</p>{% endif %}
+        {% if can_manage_contest %}
+        <form action="/admin/questions/{{ q.id }}/answer" method="post">
+            <label>답변</label><textarea name="answer" required>{{ q.answer if q.answer else "" }}</textarea>
+            <label><input type="checkbox" name="is_public" {% if q.is_public %}checked{% endif %}> 공개 질문으로 표시</label>
+            <button type="submit">답변 저장</button>
+        </form>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="hint">등록된 질문이 없습니다.</p>
+    {% endfor %}
+</section>{% endif %}
+
+
+
+{% if editorial_visible %}
+<section id="editorials" class="tab-panel box">
+    <h3>에디토리얼</h3>
+    {% if can_manage_contest %}
+    <p class="hint">관리자는 대회 진행 전/진행 중에도 에디토리얼을 등록할 수 있습니다. 일반 참가자에게는 대회 종료 후 등록된 에디토리얼만 표시됩니다.</p>
+    {% elif not contest_closed %}
+    <p class="hint">에디토리얼은 대회 종료 후 공개됩니다.</p>
+    {% endif %}
+
+    {% if stats %}
+        {% for item in stats %}
+        {% set editorial = editorial_map.get(item.problem.id) %}
+        {% if can_manage_contest or (contest_closed and editorial and (editorial.content or editorial.image_path)) %}
+        <div class="editorial-card">
+            <h4>{{ item.link.label }}. {{ item.problem.title }}</h4>
+            {% if editorial and editorial.image_path %}
+            <div class="editorial-image-wrap"><img src="{{ editorial.image_path }}" alt="{{ item.link.label }}번 에디토리얼 이미지" class="editorial-image"></div>
+            {% endif %}
+            {% if editorial and editorial.content %}
+            {{ editorial.content|rich_text }}
+            {% elif not can_manage_contest %}
+            <p class="hint">등록된 에디토리얼이 없습니다.</p>
+            {% endif %}
+
+            {% if can_manage_contest %}
+            <form action="/admin/contests/{{ contest.id }}/editorials/{{ item.problem.id }}" method="post" enctype="multipart/form-data" class="sub-box">
+                <label>에디토리얼 내용</label>
+                <textarea name="content" class="short-textarea" placeholder="풀이 아이디어, 시간 복잡도, 주의할 반례 등을 작성하세요.">{{ editorial.content if editorial else "" }}</textarea>
+                <label>이미지 업로드</label>
+                <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp">
+                {% if editorial and editorial.image_path %}
+                <label><input type="checkbox" name="clear_image"> 기존 이미지 삭제</label>
+                {% endif %}
+                <button type="submit">에디토리얼 저장</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% endfor %}
+    {% else %}
+    <p class="hint">등록된 대회 문제가 없습니다.</p>
+    {% endif %}
+</section>
+{% endif %}
+
+{% if can_manage_contest and not (contest.is_exam_mode and contest_started and not user.is_admin) %}
+<section id="add-problem" class="tab-panel box">
+    <h3>문제 추가</h3>
+    {% if contest_closed %}
+    <p class="hint">종료된 대회에서는 문제를 추가할 수 없습니다.</p>
+    {% else %}
+    <div class="box sub-box">
+        <h4>등록된 문제 추가</h4>
+        <form action="/admin/contests/{{ contest.id }}/add-existing-problem" method="post">
+            <select name="problem_id">
+                {% for p in public_problems %}<option value="{{ p.id }}">{{ p.id }} - {{ p.title }}{% if p.is_contest_only %} (대회 전용){% elif not p.is_public %} (비공개){% endif %}</option>{% endfor %}
+            </select>
+            {% if contest.score_enabled %}<label>배점</label><input type="number" name="score" value="100" min="0" max="100000">{% endif %}
+            <button type="submit">대회에 추가</button>
+        </form>
+    </div>
+    {% if can_create_new_contest_problem %}
+    <div class="box sub-box">
+        <h4>{% if group_contest %}그룹 대회용 새 문제 추가{% else %}대회 전용 새 문제 추가{% endif %}</h4>
+        {% if group_contest %}
+        <div class="notice-box">
+            <p><b>문제 등록 전 확인</b></p>
+            <p>이 문제는 학교 분반 그룹 대회용으로 등록됩니다. 등록된 문제는 관리자 검토 후 OJ의 일반 공개 문제로 전환될 수 있습니다.</p>
+            <p>타인의 저작물을 무단으로 등록하지 말고, 개인정보나 부적절한 내용이 포함되지 않도록 주의해 주세요.</p>
+        </div>
+        {% endif %}
+        <form action="/admin/contests/{{ contest.id }}/add-new-problem" method="post">
+            {% if not group_contest or (user and user.is_admin) %}<label>내부 문제 ID</label><input type="number" name="problem_id" placeholder="비워두면 자동 생성">{% endif %}
+            <label>제목</label><input type="text" name="title" required>
+            <label>문제 설명</label><textarea name="description" required></textarea>
+            <label>입력 설명</label><textarea name="input_description" required></textarea>
+            <label>출력 설명</label><textarea name="output_description" required></textarea>
+            <label>시간 제한</label><input type="number" name="time_limit" value="2" required>
+            <label>메모리 제한</label><input type="number" name="memory_limit" value="256" required>
+            {% if contest.score_enabled %}<label>배점</label><input type="number" name="score" value="100" min="0" max="100000">{% endif %}
+            <label><input type="checkbox" name="is_judge_ready" checked> 제출 가능</label>
+            <label>예제 입력</label><textarea name="sample_inputs">1 2</textarea>
+            <label>예제 출력</label><textarea name="sample_outputs">3</textarea>
+            <label>테스트 입력</label><textarea name="test_inputs" required>1 2
+---
+10 20</textarea>
+            <label>테스트 출력</label><textarea name="test_outputs" required>3
+---
+30</textarea>
+            {% if group_contest %}
+            <label><input type="checkbox" name="publish_notice_agree" required> 등록한 문제가 차후 OJ 일반 문제로 공개될 수 있으며, 저작권/개인정보/부적절한 내용이 없어야 함을 확인했습니다.</label>
+            {% endif %}
+            <button type="submit">{% if group_contest %}그룹 대회용 문제 추가{% else %}대회 전용 문제 추가{% endif %}</button>
+        </form>
+    </div>
+    {% elif group_contest %}
+    <div class="box sub-box">
+        <h4>그룹 대회용 새 문제 추가</h4>
+        <p class="hint">일반 그룹에서는 새 문제를 등록할 수 없습니다. 학교 분반 그룹의 그룹 관리자 또는 OJ 관리자만 사용할 수 있습니다.</p>
+    </div>
+    {% endif %}
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}

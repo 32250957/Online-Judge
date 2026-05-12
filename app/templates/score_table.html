@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>점수표 - {{ contest.title }}</h2>
+<p class="hint">순위 제외 문제는 점수 계산에서 제외됩니다. AC를 받은 문제는 해당 문제 배점만큼 반영됩니다.</p>
+<div class="inline-toolbar">
+    {% if group_contest %}
+    <a class="button secondary" href="/groups/{{ group.id }}#contests">그룹으로 돌아가기</a>
+    <a class="button" href="/admin/group-contests/{{ group_contest.id }}/scores.csv">점수표 CSV</a>
+    {% else %}
+    <a class="button secondary" href="/contests/{{ contest.id }}">대회로 돌아가기</a>
+    <a class="button" href="/admin/contests/{{ contest.id }}/scores.csv">점수표 CSV</a>
+    {% endif %}
+</div>
+<table>
+    <thead>
+        {% if rows %}
+        <tr>{% for cell in rows[0] %}<th>{{ cell }}</th>{% endfor %}</tr>
+        {% endif %}
+    </thead>
+    <tbody>
+        {% for row in rows[1:] %}
+        <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% else %}
+        <tr><td colspan="10">아직 점수표에 표시할 제출이 없습니다.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

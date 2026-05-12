@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>성능 점검</h2>
+<section class="box">
+    <h3>요약</h3>
+    <div class="grid">
+        {% for row in table_counts %}
+        <div class="box mini-card"><h4>{{ row.label }}</h4><p class="big">{{ row.count }}</p><p class="hint">{{ row.name }}</p></div>
+        {% endfor %}
+    </div>
+    <p class="hint">랭킹 캐시: {{ ranking_cache_size }}개 / TTL {{ ranking_cache_ttl }}초</p>
+    <p class="hint">채점 큐: 대기 {{ queue_counts.queued }}개, 실행 {{ queue_counts.running }}개, 실패 {{ queue_counts.failed }}개</p>
+</section>
+
+<section class="box">
+    <h3>제출이 많은 대회</h3>
+    <table>
+        <thead><tr><th>대회</th><th>제출 수</th><th>관리</th></tr></thead>
+        <tbody>
+        {% for contest_id, title, submission_count in heavy_contests %}
+        <tr><td><a href="/contests/{{ contest_id }}">{{ contest_id }} - {{ title }}</a></td><td>{{ submission_count }}</td><td><a href="/admin/contests/{{ contest_id }}/ranking.csv">순위 CSV</a></td></tr>
+        {% else %}
+        <tr><td colspan="3">대회가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>느린 요청 기록</h3>
+    <p class="hint">최근 서버 응답 시간이 기준값을 넘은 요청입니다. 서버 재시작 시 초기화됩니다.</p>
+    <table>
+        <thead><tr><th>시각</th><th>메서드</th><th>경로</th><th>응답 시간</th></tr></thead>
+        <tbody>
+        {% for row in slow_requests %}
+        <tr><td>{{ row.created_at }}</td><td>{{ row.method }}</td><td>{{ row.path }}</td><td>{{ row.elapsed_ms }} ms</td></tr>
+        {% else %}
+        <tr><td colspan="4">기록된 느린 요청이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

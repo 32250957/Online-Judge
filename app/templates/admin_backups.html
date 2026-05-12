@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>백업 / 데이터 보존</h2>
+<section class="box">
+    <p class="hint">현재 DB 주요 테이블과 problems/uploads 파일을 ZIP으로 묶어 다운로드합니다.</p>
+    <p class="hint">이 백업은 보존 및 수동 복구용입니다. 자동 복원 기능은 아직 제공하지 않습니다.</p>
+    <a class="button" href="/admin/backups/download">전체 백업 ZIP 다운로드</a>
+    <a class="button" href="/admin/diagnostics">시스템 점검으로 이동</a>
+</section>
+<section class="box">
+    <h3>백업 대상 요약</h3>
+    <table class="backup-count-table">
+        <thead><tr><th>항목</th><th>개수</th></tr></thead>
+        <tbody>
+            <tr><td>회원</td><td>{{ counts.users }}</td></tr>
+            <tr><td>문제</td><td>{{ counts.problems }}</td></tr>
+            <tr><td>제출</td><td>{{ counts.submissions }}</td></tr>
+            <tr><td>대회</td><td>{{ counts.contests }}</td></tr>
+            <tr><td>그룹</td><td>{{ counts.groups }}</td></tr>
+            <tr><td>게시글</td><td>{{ counts.board_posts }}</td></tr>
+            <tr><td>현재 점검 경고</td><td>{{ counts.warnings }}</td></tr>
+        </tbody>
+    </table>
+</section>
+{% endblock %}

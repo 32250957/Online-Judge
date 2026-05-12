@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box">
+    <h2>채점 로그 상세</h2>
+    <p><b>로그 ID:</b> {{ log.id }}</p>
+    <p><b>제출:</b> {% if log.submission_id %}<a href="/submissions/{{ log.submission_id }}">#{{ log.submission_id }}</a>{% else %}-{% endif %}</p>
+    <p><b>워커:</b> {{ log.worker_name }}</p>
+    <p><b>이벤트:</b> {{ log.event }}</p>
+    <p><b>시간:</b> {{ log.created_at }}</p>
+    <h3>내용</h3>
+    <pre>{{ log.message }}</pre>
+</section>
+{% if related_logs %}
+<section class="box">
+    <h3>같은 제출의 로그</h3>
+    <table>
+        <thead><tr><th>ID</th><th>시간</th><th>이벤트</th><th>내용</th></tr></thead>
+        <tbody>
+        {% for item in related_logs %}
+        <tr><td><a href="/admin/judge-logs/{{ item.id }}">{{ item.id }}</a></td><td>{{ item.created_at }}</td><td>{{ item.event }}</td><td>{{ item.message }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}
+{% endblock %}

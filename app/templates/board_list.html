@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+    <h2>게시판 - {{ board_name }}</h2>
+</div>
+<div class="tabs board-tabs">
+    {% for key, label in board_types.items() %}
+    <a class="button {% if key != board_type %}secondary{% endif %}" href="/boards/{{ key }}">{{ label }}</a>
+    {% endfor %}
+</div>
+
+{% if can_write %}
+<details class="box">
+    <summary>글쓰기</summary>
+    <form action="/boards/{{ board_type }}/new" method="post">
+        <label>제목</label><input type="text" name="title" required>
+        <label>내용</label><textarea name="content" class="short-code-textarea" required></textarea>
+        {% if user and user.is_admin %}<label><input type="checkbox" name="is_pinned"> 상단 고정</label>{% endif %}
+        <button type="submit">등록</button>
+    </form>
+</details>
+{% elif board_type == 'all' %}
+<p class="hint">글쓰기는 공지, 자유, 홍보, 질문, 요청 탭에서 할 수 있습니다.</p>
+{% elif not user %}
+<p class="hint">글을 작성하려면 로그인해야 합니다.</p>
+{% endif %}
+
+<table class="board-table">
+    <thead><tr><th>번호</th><th>분류</th><th>제목</th><th>작성자</th><th>작성일</th></tr></thead>
+    <tbody>
+    {% for post in posts %}
+    <tr class="{% if post.is_pinned %}pinned-row{% endif %}">
+        <td>{{ post.display_number or post.id }}</td>
+        <td>{{ board_types.get(post.board_type, post.board_type) }}</td>
+        <td><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a></td>
+        <td>{{ post.author.username if post.author else '-' }}</td>
+        <td>{{ post.created_at }}</td>
+    </tr>
+    {% else %}<tr><td colspan="5">게시글이 없습니다.</td></tr>{% endfor %}
+    </tbody>
+</table>
+{% endblock %}

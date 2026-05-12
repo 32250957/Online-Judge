@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>채점 워커 상태 / 로그</h2>
+<p><a class="button" href="/admin/system">시스템 상태 페이지</a> <a class="button" href="/admin/permissions">권한 점검</a> <a class="button" href="/admin/judge-queue">채점 큐 관리</a></p>
+<div class="grid">
+    <div class="box"><h3>활성 워커</h3><p class="big" id="active-workers">{{ active_workers }}</p></div>
+    <div class="box"><h3>대기</h3><p class="big" id="pending">{{ pending }}</p></div>
+    <div class="box"><h3>채점 중</h3><p class="big" id="judging">{{ judging }}</p></div>
+    <div class="box"><h3>멈춤 의심</h3><p class="big" id="stuck">{{ stuck }}</p></div>
+    <div class="box"><h3>실패</h3><p class="big" id="failed">{{ failed }}</p></div>
+    <div class="box"><h3>큐 대기</h3><p class="big" id="queued-jobs">{{ queued_jobs }}</p></div>
+    <div class="box"><h3>큐 실행</h3><p class="big" id="running-jobs">{{ running_jobs }}</p></div>
+    <div class="box"><h3>큐 실패</h3><p class="big" id="failed-jobs">{{ failed_jobs }}</p></div>
+</div>
+<section class="box">
+    <h3>멈춘 채점 처리</h3>
+    <p>10분 이상 JUDGING 상태로 남은 제출은 워커 중단 또는 컨테이너 재시작 과정에서 멈춘 것으로 볼 수 있습니다.</p>
+    <form method="post" action="/admin/worker/requeue-stuck">
+        <button type="submit">멈춘 제출 다시 대기열에 넣기</button>
+    </form>
+</section>
+<section class="box">
+    <h3>최근 워커 heartbeat</h3>
+    <table id="heartbeat-table">
+        <thead><tr><th>시간</th><th>워커</th><th>상태</th></tr></thead>
+        <tbody>
+        {% for log in recent_heartbeats %}
+        <tr><td>{{ log.created_at }}</td><td>{{ log.worker_name }}</td><td>{{ log.message }}</td></tr>
+        {% else %}
+        <tr><td colspan="3">최근 heartbeat가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+<section class="box">
+    <h3>최근 채점 큐</h3>
+    <table>
+        <thead><tr><th>Job</th><th>제출</th><th>상태</th><th>종류</th><th>워커</th><th>생성</th></tr></thead>
+        <tbody>
+        {% for job in recent_jobs %}
+        <tr><td>{{ job.id }}</td><td><a href="/submissions/{{ job.submission_id }}">{{ job.submission_id }}</a></td><td>{{ job.status }}</td><td>{{ job.job_type }}</td><td>{{ job.worker_name or '-' }}</td><td>{{ job.created_at }}</td></tr>
+        {% else %}
+        <tr><td colspan="6">큐 작업이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+<section class="box">
+    <h3>최근 채점 로그</h3>
+    <table id="worker-log-table">
+        <thead><tr><th>시간</th><th>워커</th><th>이벤트</th><th>제출</th><th>내용</th></tr></thead>
+        <tbody>
+        {% for log in logs %}
+        <tr><td>{{ log.created_at }}</td><td>{{ log.worker_name }}</td><td>{{ log.event }}</td><td>{{ log.submission_id or '-' }}</td><td><a href="/admin/judge-logs/{{ log.id }}">{{ log.message }}</a></td></tr>
+        {% else %}
+        <tr><td colspan="5">로그가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+<script>
+async function refreshWorkerStatus() {
+    const response = await fetch('/api/worker/status');
+    if (!response.ok) return;
+    const data = await response.json();
+    document.getElementById('active-workers').textContent = data.active_workers;
+    document.getElementById('pending').textContent = data.pending;
+    document.getElementById('judging').textContent = data.judging;
+    document.getElementById('stuck').textContent = data.stuck;
+    document.getElementById('failed').textContent = data.failed;
+    document.getElementById('queued-jobs').textContent = data.queued_jobs ?? 0;
+    document.getElementById('running-jobs').textContent = data.running_jobs ?? 0;
+    document.getElementById('failed-jobs').textContent = data.failed_jobs ?? 0;
+    const heartbeatBody = document.querySelector('#heartbeat-table tbody');
+    heartbeatBody.innerHTML = '';
+    for (const log of data.recent_heartbeats || []) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${log.time}</td><td>${log.worker}</td><td>${log.message}</td>`;
+        heartbeatBody.appendChild(tr);
+    }
+    const tbody = document.querySelector('#worker-log-table tbody');
+    tbody.innerHTML = '';
+    for (const log of data.recent_logs) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${log.time}</td><td>${log.worker}</td><td>${log.event}</td><td>${log.submission_id ?? '-'}</td><td>${log.message}</td>`;
+        tbody.appendChild(tr);
+    }
+}
+setInterval(refreshWorkerStatus, 3000);
+</script>
+{% endblock %}

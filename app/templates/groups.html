@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+    <h2>그룹</h2>
+    {% if user %}<a class="button" href="/groups/new">그룹 만들기</a>{% endif %}
+</div>
+<form method="get" action="/groups" class="box search-box">
+    <label>그룹 이름 검색</label>
+    <div class="inline-actions">
+        <input type="text" name="q" value="{{ q or '' }}" placeholder="그룹 이름 입력">
+        <button type="submit">검색</button>
+        {% if q %}<a class="button secondary" href="/groups">초기화</a>{% endif %}
+    </div>
+</form>
+<table>
+    <thead><tr><th>ID</th><th>그룹명</th><th>설명</th><th>소유자</th><th>공개</th><th>분반</th><th>회원 수</th></tr></thead>
+    <tbody>
+        {% for group in groups %}
+        <tr class="{% if active_group_ids is defined and group.id in active_group_ids %}active-group-row{% endif %}">
+            <td>{{ group.id }}{% if active_group_ids is defined and group.id in active_group_ids %}<br><span class="badge">대회 진행 중</span>{% endif %}</td>
+            <td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td>
+            <td>{{ group.description|rich_text }}</td>
+            <td>{{ group.owner.username if group.owner else "-" }}</td>
+            <td>{{ "공개" if group.is_public else "비공개" }}</td>
+            <td>{{ "학교 분반" if group.is_school_group else "일반" }}</td>
+            <td>{{ group.members|length }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7">아직 생성된 그룹이 없습니다.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

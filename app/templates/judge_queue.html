@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>채점 큐 관리</h2>
+<p><a class="button" href="/admin">관리자 메인</a> <a class="button" href="/admin/worker">채점 워커 상태</a> <a class="button" href="/admin/system">시스템 상태</a></p>
+<section class="box">
+    <p class="hint">제출과 채점 작업을 분리한 DB 기반 큐 상태입니다. 여러 워커를 실행해도 RUNNING 작업을 중복으로 가져가지 않도록 처리합니다.</p>
+    <div class="stats-grid">
+        <div class="stat-card"><b>{{ active_workers }}</b><span>활성 워커</span></div>
+        <div class="stat-card"><b>{{ stuck_count }}</b><span>멈춤 의심</span></div>
+        {% for key, count in counts.items() %}
+        <div class="stat-card"><b>{{ count }}</b><span>{{ key }}</span></div>
+        {% endfor %}
+    </div>
+</section>
+<section class="box">
+    <h3>빠른 처리</h3>
+    <form method="post" action="/admin/judge-queue/requeue-stuck" class="inline-actions">
+        <button type="submit">멈춘 제출 다시 대기열에 넣기</button>
+    </form>
+    <form method="post" action="/admin/judge-queue/requeue-failed" class="inline-actions">
+        <button type="submit">실패한 채점 작업 다시 대기열에 넣기</button>
+    </form>
+    <p class="hint">멈춤 복구는 10분 이상 JUDGING 상태인 제출을 대상으로 합니다. 실패 작업 재등록은 FAILED job의 제출을 다시 채점 큐에 넣습니다.</p>
+</section>
+<section class="box">
+    <form method="get" class="horizontal-filter">
+        <div>
+            <label>상태</label>
+            <select name="status">
+                <option value="" {% if not status %}selected{% endif %}>전체</option>
+                {% for key in statuses %}<option value="{{ key }}" {% if status == key %}selected{% endif %}>{{ key }}</option>{% endfor %}
+            </select>
+        </div>
+        <button type="submit">필터 적용</button>
+        <a class="button secondary" href="/admin/judge-queue">초기화</a>
+    </form>
+</section>
+<table>
+    <thead><tr><th>Job</th><th>제출</th><th>종류</th><th>상태</th><th>워커</th><th>시도</th><th>생성</th><th>시작</th><th>종료</th><th>메시지</th><th>처리</th></tr></thead>
+    <tbody>
+        {% for job in jobs %}
+        <tr>
+            <td>{{ job.id }}</td>
+            <td><a href="/submissions/{{ job.submission_id }}">{{ job.submission_id }}</a></td>
+            <td>{{ job.job_type }}</td>
+            <td><span class="badge {% if job.status == 'FAILED' %}danger-badge{% elif job.status == 'DONE' %}badge-ok{% elif job.status in ['QUEUED', 'RUNNING'] %}badge-warn{% endif %}">{{ job.status }}</span></td>
+            <td>{{ job.worker_name or '-' }}</td>
+            <td>{{ job.attempts }}</td>
+            <td>{{ job.created_at }}</td>
+            <td>{{ job.started_at or '-' }}</td>
+            <td>{{ job.finished_at or '-' }}</td>
+            <td><small>{{ job.error_message[:120] if job.error_message else '' }}</small></td>
+            <td>
+                {% if job.status in ['FAILED', 'CANCELED'] %}
+                <form method="post" action="/admin/judge-queue/jobs/{{ job.id }}/requeue" class="inline-actions"><button type="submit">재대기</button></form>
+                {% endif %}
+                {% if job.status in ['QUEUED', 'RUNNING'] %}
+                <form method="post" action="/admin/judge-queue/jobs/{{ job.id }}/cancel" class="inline-actions"><button type="submit">취소</button></form>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="11">표시할 채점 작업이 없습니다.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box not-found-box">
+    <h2>404 Not Found</h2>
+    <p>요청한 페이지를 찾을 수 없습니다.</p>
+    <p class="hint">대회 시작 전 문제이거나, 아직 일반 문제로 전환되지 않은 대회 전용 문제일 수 있습니다.</p>
+    <a class="button" href="{{ return_url if return_url is defined else '/' }}">{{ return_label if return_label is defined else '문제 목록으로 돌아가기' }}</a>
+</section>
+{% endblock %}

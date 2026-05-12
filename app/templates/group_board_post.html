@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box {% if post.is_pinned %}pinned-box{% endif %}">
+    <p><a href="/groups/{{ group.id }}#board">← {{ group.name }} 그룹 게시판</a></p>
+    <div class="post-header-row">
+        <h2>{{ post.title }}</h2>
+        {% if can_manage_post %}
+        <details class="post-edit-details">
+            <summary class="button secondary small-button">수정</summary>
+            <form action="/groups/{{ group.id }}/board/{{ post.id }}/edit" method="post">
+                <label>분류</label>
+                <select name="board_type">
+                    {% for key, label in GROUP_BOARD_WRITE_TYPES.items() %}
+                    <option value="{{ key }}" {% if post.board_type == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <label>제목</label><input type="text" name="title" value="{{ post.title }}" required>
+                <label>내용</label><textarea name="content" class="short-code-textarea">{{ post.content }}</textarea>
+                {% if can_pin_post %}<label><input type="checkbox" name="is_pinned" {% if post.is_pinned %}checked{% endif %}> 상단 고정</label>{% endif %}
+                <button type="submit">저장</button>
+            </form>
+            <form action="/groups/{{ group.id }}/board/{{ post.id }}/delete" method="post" onsubmit="return confirm('이 게시글을 삭제할까요?');">
+                <button type="submit" class="danger-button">삭제</button>
+            </form>
+        </details>
+        {% endif %}
+    </div>
+    <p class="hint">{{ board_name }} · {{ post.author.username if post.author else '-' }} · {{ post.created_at }}</p>
+    <div class="post-content">{{ post.content|rich_text }}</div>
+</section>
+
+<section class="box">
+    <h3>댓글</h3>
+    {% for comment in comments %}
+    <div class="comment-card">
+        <p class="hint">{{ comment.author.username if comment.author else '-' }} · {{ comment.created_at }}</p>
+        <div>{{ comment.content|rich_text }}</div>
+        {% if user and (user.is_admin or can_pin_post or comment.author_id == user.id) %}
+        <form class="inline-actions" action="/groups/{{ group.id }}/board/{{ post.id }}/comments/{{ comment.id }}/delete" method="post" onsubmit="return confirm('이 댓글을 삭제할까요?');">
+            <button type="submit" class="danger-button small-button">삭제</button>
+        </form>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="hint">아직 댓글이 없습니다.</p>
+    {% endfor %}
+
+    {% if user %}
+    <details class="sub-box comment-write-box">
+        <summary class="button secondary">댓글 쓰기</summary>
+        <form action="/groups/{{ group.id }}/board/{{ post.id }}/comments" method="post">
+            <label>댓글 내용</label>
+            <textarea name="content" class="short-textarea" required></textarea>
+            <button type="submit">등록</button>
+        </form>
+    </details>
+    {% endif %}
+</section>
+{% endblock %}

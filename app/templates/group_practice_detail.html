@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box">
+    <p><a href="/groups/{{ group.id }}#practice">← {{ group.name }} 연습 목록</a></p>
+    <div class="post-header-row">
+        <div>
+            <h2>{{ practice.title }}</h2>
+            {{ practice.description|rich_text }}
+            <p class="hint">기간: {{ practice.start_time if practice.start_time else '제한 없음' }} ~ {{ practice.end_time if practice.end_time else '제한 없음' }}</p>
+            <p class="hint">상태: {% if practice_is_closed(practice) %}종료{% elif practice_is_open(practice) %}진행 중{% else %}시작 전{% endif %}</p>
+        </div>
+        {% if can_manage %}
+        <details class="post-edit-details compact-edit-details">
+            <summary class="button secondary small-button">설정 수정</summary>
+            <form action="/groups/{{ group.id }}/practices/{{ practice.id }}/edit-description" method="post">
+                <label>설명 수정</label>
+                <textarea name="description" class="short-textarea">{{ practice.description }}</textarea>
+                <button type="submit">저장</button>
+            </form>
+            {% if not practice_is_closed(practice) %}
+            <form action="/groups/{{ group.id }}/practices/{{ practice.id }}/end" method="post" onsubmit="return confirm('이 연습을 지금 종료할까요?');">
+                <button type="submit" class="secondary">연습 수동 종료</button>
+            </form>
+            {% endif %}
+        </details>
+        {% endif %}
+    </div>
+</section>
+
+<section class="box">
+    <h3>문제</h3>
+    <table>
+        <thead><tr><th>순서</th><th>번호</th><th>제목</th><th>관리</th></tr></thead>
+        <tbody>
+        {% for item in items %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ item.problem_id }}</td>
+                <td><a href="/groups/{{ group.id }}/practices/{{ practice.id }}/problems/{{ item.problem_id }}">{{ item.problem.title if item.problem else '-' }}</a></td>
+                <td>{% if can_manage and not practice_is_closed(practice) %}<form class="inline-actions" action="/groups/{{ group.id }}/practices/{{ practice.id }}/items/{{ item.id }}/delete" method="post"><button type="submit">제거</button></form>{% else %}-{% endif %}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="4">아직 연결된 문제가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if can_manage and not practice_is_closed(practice) %}
+    <details class="sub-box">
+        <summary>문제 추가 / 순서 변경</summary>
+        <form action="/groups/{{ group.id }}/practices/{{ practice.id }}/add-problem" method="post" class="inline-form">
+            <label>문제 번호 직접 추가</label>
+            <input type="text" name="problem_ids" placeholder="예: 1000, 1001" required>
+            <button type="submit">추가</button>
+        </form>
+        <form action="/groups/{{ group.id }}/practices/{{ practice.id }}/reorder" method="post" class="inline-form">
+            <label>문제 배치 순서</label>
+            <input type="text" name="ordered_problem_ids" value="{% for item in items %}{{ item.problem_id }}{% if not loop.last %}, {% endif %}{% endfor %}">
+            <button type="submit">순서 저장</button>
+        </form>
+    </details>
+    {% endif %}
+    {% if can_manage %}
+    <div class="inline-toolbar">
+        <a class="button secondary" href="/admin/group-practices/{{ practice.id }}/board.csv">연습 보드 CSV</a>
+        <a class="button secondary" href="/admin/group-practices/{{ practice.id }}/progress.csv">문제별 현황 CSV</a>
+        <form action="/admin/group-practices/{{ practice.id }}/rejudge" method="post" onsubmit="return confirm('이 연습 제출 전체를 재채점할까요?');"><button type="submit">연습 제출 재채점</button></form>
+    </div>
+    {% endif %}
+</section>
+
+<section class="box">
+    <h3>연습 보드</h3>
+    <table>
+        <thead>
+            <tr><th>회원</th><th>맞은 개수</th>{% for item in items %}<th>{{ item.problem_id }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+        {% for row in board %}
+            <tr>
+                <td>{{ row.user.username if row.user else '-' }}</td>
+                <td>{{ row.solved_count }}</td>
+                {% for cell in row.cells %}<td>{% if cell.solved %}AC / {{ cell.attempts }}회{% elif cell.attempts > 0 %}시도 {{ cell.attempts }}회{% else %}-{% endif %}</td>{% endfor %}
+            </tr>
+        {% else %}
+            <tr><td colspan="2">표시할 회원이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+
+<section class="box">
+    <h3>문제별 정답자 / 미해결자 / 미제출자</h3>
+    {% if can_manage %}
+    <p class="hint">그룹 관리자는 각 문제별로 정답자, 제출했지만 아직 해결하지 못한 회원, 미제출 회원을 확인할 수 있습니다.</p>
+    {% for row in progress_rows %}
+    <details class="question-card">
+        <summary><b>{{ row.problem_id }}</b> {{ row.problem.title if row.problem else '' }} — 정답 {{ row.solved|length }}명 / 미해결 {{ row.unsolved|length }}명 / 미제출 {{ row.not_submitted|length }}명</summary>
+        <div class="three-column-grid">
+            <div><h4>정답자</h4><p>{{ row.solved|map(attribute='username')|join(', ') if row.solved else '-' }}</p></div>
+            <div><h4>미해결자</h4><p>{{ row.unsolved|map(attribute='username')|join(', ') if row.unsolved else '-' }}</p></div>
+            <div><h4>미제출자</h4><p>{{ row.not_submitted|map(attribute='username')|join(', ') if row.not_submitted else '-' }}</p></div>
+        </div>
+    </details>
+    {% else %}
+    <p class="hint">연결된 문제가 없습니다.</p>
+    {% endfor %}
+    {% else %}
+    <p class="hint">문제별 진행 현황은 그룹 관리자 이상만 볼 수 있습니다.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

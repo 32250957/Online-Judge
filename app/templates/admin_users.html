@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>회원 관리 / 제출 제한</h2>
+{% if message %}<div class="info-box">{{ message }}</div>{% endif %}
+<div class="box admin-user-tools">
+    <div class="filter-grid">
+        <div>
+            <label>아이디/이름/학번 검색</label>
+            <input type="text" id="userSearch" placeholder="아이디, 이름, 학번을 입력하세요" oninput="filterUsers()">
+        </div>
+        <div>
+            <label>이름 등록 여부</label>
+            <select id="fullNameFilter" onchange="filterUsers()">
+                <option value="all">전체</option>
+                <option value="present">이름 있음</option>
+                <option value="missing">이름 없음</option>
+            </select>
+        </div>
+        <div>
+            <label>학번 등록 여부</label>
+            <select id="studentIdFilter" onchange="filterUsers()">
+                <option value="all">전체</option>
+                <option value="present">학번 있음</option>
+                <option value="missing">학번 없음</option>
+            </select>
+        </div>
+    </div>
+    <details>
+        <summary>CSV로 계정 일괄 생성</summary>
+        <p class="hint">첫 줄은 username,password,full_name,student_id 형식입니다. 이미 존재하는 아이디는 건너뜁니다.</p>
+        <form action="/admin/users/bulk-create" method="post" enctype="multipart/form-data">
+            <input type="file" name="csv_file" accept=".csv,text/csv">
+            <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
+            <textarea name="csv_text" class="short-code-textarea" placeholder="username,password,full_name,student_id\nstudent01,1234,홍길동,10101"></textarea>
+            <button type="submit">계정 일괄 생성</button>
+        </form>
+    </details>
+    <details>
+        <summary>CSV로 기존 회원 이름/학번 일괄 등록</summary>
+        <p class="hint">첫 줄은 username,full_name,student_id 형식입니다. username이 일치하는 기존 회원의 이름/학번만 수정합니다.</p>
+        <form action="/admin/users/bulk-update-profile" method="post" enctype="multipart/form-data">
+            <input type="file" name="csv_file" accept=".csv,text/csv">
+            <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
+            <textarea name="csv_text" class="short-code-textarea" placeholder="username,full_name,student_id\nstudent01,홍길동,10101"></textarea>
+            <button type="submit">이름/학번 일괄 등록</button>
+        </form>
+    </details>
+</div>
+<form id="adminBulkUserForm" method="post"></form>
+<div class="inline-toolbar bulk-actions">
+    <button type="button" onclick="selectFilteredUsers(true)">필터 결과 전체 선택</button>
+    <button type="button" onclick="selectFilteredUsers(false)">필터 결과 선택 해제</button>
+    <span class="hint" id="userFilterCount"></span>
+    <input type="text" name="new_password" form="adminBulkUserForm" value="changeme1234" placeholder="초기화 비밀번호">
+    <button type="submit" form="adminBulkUserForm" formaction="/admin/users/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
+</div>
+<table>
+    <thead><tr><th>선택</th><th>ID</th><th>아이디</th><th>이름/학번</th><th>관리자</th><th>비번 변경</th><th>제출 제한</th><th>관리자 변경</th><th>관리</th></tr></thead>
+    <tbody>
+        {% for item in users %}
+        <tr class="user-row" data-username="{{ item.username|lower }}" data-full-name="{{ item.full_name|lower }}" data-student-id="{{ item.student_id|lower }}" data-user-id="{{ item.id }}" data-has-full-name="{{ '1' if item.full_name else '0' }}" data-has-student-id="{{ '1' if item.student_id else '0' }}">
+            <td>{% if item.id != user.id %}<input type="checkbox" name="user_ids" value="{{ item.id }}" form="adminBulkUserForm">{% endif %}</td>
+            <td>{{ item.id }}</td>
+            <td>{{ item.username }}</td>
+            <td>
+                <form action="/admin/users/{{ item.id }}/profile" method="post" class="inline-form stacked-inline-form">
+                    <input type="text" name="full_name" value="{{ item.full_name }}" placeholder="이름">
+                    <input type="text" name="student_id" value="{{ item.student_id }}" placeholder="학번">
+                    <button type="submit">저장</button>
+                </form>
+            </td>
+            <td>{{ "관리자" if item.is_admin else "일반" }}</td>
+            <td>{{ "필요" if item.must_change_password else "-" }}</td>
+            <td>
+                {% if item.submit_banned_until and item.submit_banned_until > now %}
+                    {{ item.submit_banned_until }}까지<br>사유: {{ item.ban_reason if item.ban_reason else "-" }}
+                {% else %}없음{% endif %}
+            </td>
+            <td>
+                {% if item.id != user.id %}
+                <form action="/admin/users/{{ item.id }}/toggle-admin" method="post"><button type="submit">{% if item.is_admin %}관리자 해제{% else %}관리자 지정{% endif %}</button></form>
+                {% else %}본인{% endif %}
+            </td>
+            <td>
+                {% if item.id != user.id %}
+                <details>
+                    <summary>관리 열기</summary>
+                    <form action="/admin/users/{{ item.id }}/ban-submit" method="post" class="inline-form stacked-inline-form">
+                        <input type="number" name="seconds" value="10" min="1">
+                        <input type="text" name="reason" placeholder="사유">
+                        <button type="submit">초 단위 제출 제한</button>
+                    </form>
+                    <form action="/admin/users/{{ item.id }}/unban-submit" method="post"><button type="submit">제한 해제</button></form>
+                    <form action="/admin/users/{{ item.id }}/reset-password" method="post" class="inline-form stacked-inline-form" onsubmit="return confirm('이 사용자의 비밀번호를 초기화할까요?');">
+                        <input type="text" name="new_password" placeholder="새 비밀번호" required>
+                        <button type="submit">비밀번호 초기화</button>
+                    </form>
+                </details>
+                {% else %}본인 관리 제한{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+<script>
+function userRowMatches(row) {
+    const keyword = document.getElementById("userSearch").value.trim().toLowerCase();
+    const fullNameFilter = document.getElementById("fullNameFilter").value;
+    const studentIdFilter = document.getElementById("studentIdFilter").value;
+    const haystack = [row.dataset.username, row.dataset.fullName, row.dataset.studentId, row.dataset.userId].join(" ");
+    if (keyword && !haystack.includes(keyword)) return false;
+    if (fullNameFilter === "present" && row.dataset.hasFullName !== "1") return false;
+    if (fullNameFilter === "missing" && row.dataset.hasFullName === "1") return false;
+    if (studentIdFilter === "present" && row.dataset.hasStudentId !== "1") return false;
+    if (studentIdFilter === "missing" && row.dataset.hasStudentId === "1") return false;
+    return true;
+}
+function filterUsers() {
+    let visible = 0;
+    document.querySelectorAll(".user-row").forEach(row => {
+        const matched = userRowMatches(row);
+        row.style.display = matched ? "" : "none";
+        if (matched) visible += 1;
+    });
+    const counter = document.getElementById("userFilterCount");
+    if (counter) counter.textContent = `필터 결과 ${visible}명`;
+}
+function selectFilteredUsers(checked) {
+    document.querySelectorAll(".user-row").forEach(row => {
+        if (userRowMatches(row)) {
+            const box = row.querySelector("input[type='checkbox'][name='user_ids']");
+            if (box) box.checked = checked;
+        }
+    });
+}
+window.addEventListener("DOMContentLoaded", filterUsers);
+</script>
+{% endblock %}

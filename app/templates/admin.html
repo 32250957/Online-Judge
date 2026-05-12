@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>관리자 페이지</h2>
+<p><a class="button" href="/admin/permissions">권한 체계 점검</a> <a class="button" href="/admin/worker">채점 워커 상태</a> <a class="button" href="/admin/judge-queue">채점 큐 관리</a> <a class="button" href="/admin/performance">성능 점검</a></p>
+<div class="grid">
+    <div class="box"><h3>문제 수</h3><p class="big">{{ problem_count }}</p></div>
+    <div class="box"><h3>회원 수</h3><p class="big">{{ user_count }}</p></div>
+    <div class="box"><h3>제출 수</h3><p class="big">{{ submission_count }}</p><p class="hint">오늘 {{ today_submission_count }}건</p></div>
+    <div class="box"><h3>대회 수</h3><p class="big">{{ contest_count }}</p></div>
+    <div class="box"><h3>그룹 수</h3><p class="big">{{ group_count }}</p></div>
+</div>
+<div class="box judge-admin-panel">
+    <h3>채점 관리</h3>
+    <div class="grid">
+        <div class="box mini-card"><h4>활성 워커</h4><p class="big">{{ active_worker_count }}</p></div>
+        <div class="box mini-card"><h4>큐 대기</h4><p class="big">{{ judge_queue_counts.QUEUED }}</p></div>
+        <div class="box mini-card"><h4>큐 실행</h4><p class="big">{{ judge_queue_counts.RUNNING }}</p></div>
+        <div class="box mini-card"><h4>큐 실패</h4><p class="big danger-text">{{ judge_queue_counts.FAILED }}</p></div>
+        <div class="box mini-card"><h4>랭킹 캐시</h4><p class="big">{{ ranking_cache_size }}</p></div>
+        <div class="box mini-card"><h4>느린 요청</h4><p class="big">{{ slow_request_count }}</p></div>
+    </div>
+    <a class="button" href="/admin/judge-queue">채점 큐 관리</a>
+    <form method="post" action="/admin/judge-queue/requeue-stuck" class="inline-actions">
+        <button type="submit">멈춘 채점 복구</button>
+    </form>
+</div>
+
+<div class="box">
+    <a class="button" href="/admin/problems/new">일반 문제 추가</a>
+    <a class="button" href="/admin/problems">전체 문제 관리</a>
+    <a class="button" href="/admin/notifications">알림 / 공지 관리</a>
+    <a class="button" href="#admin-group-contests">그룹 대회 관리</a>
+    <a class="button" href="/admin/contests/new">대회 개최</a>
+    <a class="button" href="/admin/users">회원 관리 / 제출 제한</a>
+    <a class="button" href="/contests">대회 관리 / 질문 답변</a>
+    <a class="button" href="/groups">그룹 관리</a>
+    <a class="button" href="/admin/export/submissions.csv">제출 CSV 다운로드</a>
+    <a class="button" href="/admin/system">시스템 상태</a>
+    <a class="button" href="/admin/performance">성능 점검</a>
+    <a class="button" href="/admin/diagnostics">시스템 점검</a>
+    <a class="button" href="/admin/backups">백업 / 데이터 보존</a>
+</div>
+
+<div class="box highlight-box">
+    <h3>현재 대회 진행 중인 그룹</h3>
+    <table>
+        <thead><tr><th>그룹</th><th>소유자</th><th>상태</th></tr></thead>
+        <tbody>
+        {% for group in active_groups %}
+        <tr class="active-group-row"><td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td><td>{{ group.owner.username if group.owner else group.owner_id }}</td><td><span class="badge">진행 중인 대회 있음</span></td></tr>
+        {% else %}
+        <tr><td colspan="3">현재 진행 중인 그룹 대회가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="box">
+    <h3>그룹 대회 문제 일반 공개 검토</h3>
+    <table>
+        <thead><tr><th>문제</th><th>출처 그룹</th><th>처리</th></tr></thead>
+        <tbody>
+        {% for problem in public_review_problems %}
+        <tr>
+            <td><a href="/admin/problems/{{ problem.id }}/edit">{{ problem.id }} - {{ problem.title }}</a></td>
+            <td>{% if problem.origin_group_id %}<a href="/groups/{{ problem.origin_group_id }}">그룹 {{ problem.origin_group_id }}</a>{% else %}-{% endif %}</td>
+            <td>
+                <form action="/admin/problems/{{ problem.id }}/approve-public" method="post" class="inline-actions"><button type="submit">승인</button></form>
+                <form action="/admin/problems/{{ problem.id }}/reject-public" method="post" class="inline-actions"><button type="submit">반려</button></form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">검토 요청 중인 문제가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="box">
+    <h3>학교 분반 그룹 신청</h3>
+    <table>
+        <thead><tr><th>그룹</th><th>소유자</th><th>신청 사유</th><th>첨부</th><th>처리</th></tr></thead>
+        <tbody>
+        {% for group in school_group_pending %}
+        <tr>
+            <td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td>
+            <td>{{ group.owner.username if group.owner else group.owner_id }}</td>
+            <td>{{ group.school_group_request_reason }}</td>
+            <td>{% if group.school_group_request_file_path %}<a href="{{ group.school_group_request_file_path }}" target="_blank">{{ group.school_group_request_file_name or '첨부파일' }}</a>{% else %}-{% endif %}</td>
+            <td>
+                <form action="/admin/groups/{{ group.id }}/school-group/approve" method="post" class="inline-actions"><button type="submit">승인</button></form>
+                <form action="/admin/groups/{{ group.id }}/school-group/reject" method="post" class="inline-actions"><button type="submit">거절</button></form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">대기 중인 신청이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+
+<div id="admin-group-contests" class="box">
+    <h3>그룹 대회 관리</h3>
+    <p class="hint">그룹이 삭제된 뒤 보존된 그룹 대회도 이곳에서만 확인할 수 있습니다.</p>
+    <table>
+        <thead><tr><th>그룹 내 번호</th><th>대회</th><th>그룹</th><th>상태</th><th>기간</th></tr></thead>
+        <tbody>
+        {% for item in admin_group_contests %}
+        <tr>
+            <td>{% if item.group_id %}G{{ item.display_number or item.id }}{% else %}<span class="hint">삭제된 그룹</span>{% endif %}</td>
+            <td>{% if item.contest %}<a href="/contests/{{ item.contest.id }}">{{ item.contest.title }}</a>{% else %}{{ item.title }}{% endif %}</td>
+            <td>{% if item.group %}<a href="/groups/{{ item.group.id }}">{{ item.group.name }}</a>{% else %}<span class="badge">삭제됨</span>{% endif %}</td>
+            <td>{% if item.contest %}{{ contest_status(item.contest) }}{% else %}-{% endif %}</td>
+            <td>{% if item.contest %}{{ item.contest.start_time }} ~ {{ item.contest.end_time }}{% else %}-{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">등록된 그룹 대회가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="grid two">
+    <section class="box">
+        <h3>결과별 제출 현황</h3>
+        <table>
+            <thead><tr><th>결과</th><th>개수</th></tr></thead>
+            <tbody>{% for result, count in result_rows %}<tr><td>{{ result_label(result) }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody>
+        </table>
+    </section>
+    <section class="box">
+        <h3>최근 제출</h3>
+        <table>
+            <thead><tr><th>#</th><th>사용자</th><th>문제</th><th>결과</th></tr></thead>
+            <tbody>
+            {% for s in recent_submissions %}
+                <tr><td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td><td>{{ s.user.username if s.user else '-' }}</td><td>{{ s.problem_id }}</td><td class="result {{ s.result }}">{{ result_label(s.result) }}</td></tr>
+            {% else %}
+                <tr><td colspan="4">제출이 없습니다.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</div>
+{% endblock %}

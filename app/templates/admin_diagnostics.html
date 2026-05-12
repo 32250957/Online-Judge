@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>시스템 점검</h2>
+<section class="box">
+    <p class="hint">관리자/그룹/대회 기능을 많이 수정한 뒤 DB 스키마, 문제 파일, 테스트케이스, 주요 연결 상태를 빠르게 확인하는 페이지입니다.</p>
+    <p><strong>점검 시각:</strong> {{ checks.checked_at }}</p>
+    {% if checks.warning_count == 0 %}
+        <p class="success-text">현재 감지된 경고가 없습니다.</p>
+    {% else %}
+        <p class="danger-text">경고 {{ checks.warning_count }}건이 감지되었습니다.</p>
+    {% endif %}
+    <a class="button" href="/admin/diagnostics.json">JSON으로 보기</a>
+    <a class="button" href="/admin/backups/download">현재 상태 백업 ZIP 다운로드</a>
+</section>
+
+<section class="box">
+    <h3>DB 스키마 점검</h3>
+    <table>
+        <thead><tr><th>테이블</th><th>상태</th><th>누락 컬럼</th></tr></thead>
+        <tbody>
+        {% for row in checks.schema_checks %}
+        <tr>
+            <td>{{ row.table }}</td>
+            <td><span class="badge {{ 'badge-ok' if row.status == 'OK' else 'badge-warn' }}">{{ row.status }}</span></td>
+            <td>{% if row.missing %}{{ row.missing|join(', ') }}{% else %}-{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>문제 파일 / 테스트케이스 점검</h3>
+    <table>
+        <thead><tr><th>문제</th><th>입력</th><th>출력</th><th>상태</th><th>내용</th></tr></thead>
+        <tbody>
+        {% for row in checks.problem_file_rows %}
+        <tr>
+            <td><a href="/admin/problems/{{ row.problem.id }}/edit">{{ row.problem.id }} - {{ row.problem.title }}</a></td>
+            <td>{{ row.input_count }}</td>
+            <td>{{ row.output_count }}</td>
+            <td><span class="badge {{ 'badge-ok' if row.status == 'OK' else 'badge-warn' }}">{{ row.status }}</span></td>
+            <td>{% if row.issues %}{{ row.issues|join(', ') }}{% else %}-{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">등록된 문제가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>연결 상태 점검</h3>
+    <table>
+        <tbody>
+            <tr><th>존재하지 않는 문제를 가리키는 대회-문제 연결</th><td>{{ checks.link_checks.broken_contest_links }}</td></tr>
+            <tr><th>존재하지 않는 문제를 가리키는 제출</th><td>{{ checks.link_checks.broken_submission_problem_links }}</td></tr>
+            <tr><th>삭제된 그룹에 연결된 보존 그룹 대회</th><td>{{ checks.link_checks.group_contests_without_group }}</td></tr>
+            <tr><th>대회 정보가 없는 그룹 대회 연결</th><td>{{ checks.link_checks.group_contests_without_contest }}</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>DB에 없는 문제 폴더</h3>
+    {% if checks.orphan_problem_dirs %}
+        <p class="hint">DB에는 없지만 problems/ 아래에 남아 있는 폴더입니다. 이전 백업 또는 삭제 잔여물일 수 있습니다.</p>
+        <p>{{ checks.orphan_problem_dirs|join(', ') }}</p>
+    {% else %}
+        <p>DB에 없는 문제 폴더가 없습니다.</p>
+    {% endif %}
+</section>
+
+<section class="box">
+    <h3>전체 경고 요약</h3>
+    {% if checks.warnings %}
+        <ul>
+        {% for warning in checks.warnings %}
+            <li>{{ warning }}</li>
+        {% endfor %}
+        </ul>
+    {% else %}
+        <p>경고가 없습니다.</p>
+    {% endif %}
+</section>
+{% endblock %}

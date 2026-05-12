@@ -1,0 +1,9 @@
+{
+  "id": 1001,
+  "title": "A-B",
+  "description": "두 정수 A와 B를 입력받은 다음, A-B를 출력하는 프로그램을 작성하시오.",
+  "input_description": "첫째 줄에 A와 B가 주어진다.",
+  "output_description": "첫째 줄에 A-B를 출력한다.",
+  "time_limit": 2,
+  "memory_limit": 256
+}

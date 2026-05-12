@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{% if problem %}문제 수정{% else %}일반 문제 추가{% endif %}</h2>
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+<form action="{{ action }}" method="post" class="box">
+    {% if not problem %}
+    <label>문제 번호</label><input type="number" name="problem_id" required>
+    {% else %}
+    <p><b>문제 번호:</b> {{ problem.id }} {% if problem.is_contest_only %}(대회 전용){% endif %}</p>
+    {% endif %}
+    <label>제목</label><input type="text" name="title" value="{{ problem.title if problem else '' }}" required>
+    <label>난이도</label><input type="text" name="difficulty" value="{{ problem.difficulty if problem else '미지정' }}" placeholder="예: Bronze 3, 쉬움, 중간">
+    <label>태그</label><input type="text" name="tags" value="{{ problem.tags if problem else '' }}" placeholder="쉼표로 구분: 구현, DP, 그리디">
+    <label>출처</label><input type="text" name="source" value="{{ problem.source if problem else '' }}" placeholder="예: 2026 알고리즘 수업 1주차">
+    <div class="grid two compact-fields">
+        <div><label>문제를 만든 사람</label><input type="text" name="problem_author" value="{{ problem.problem_author if problem else '' }}" placeholder="예: 출제자 이름"></div>
+        <div><label>오류를 찾은 사람</label><input type="text" name="error_finder" value="{{ problem.error_finder if problem else '' }}" placeholder="예: 검수자 이름"></div>
+        <div><label>오타를 찾은 사람</label><input type="text" name="typo_finder" value="{{ problem.typo_finder if problem else '' }}" placeholder="예: 교정자 이름"></div>
+    </div>
+    <label>허용 언어</label>
+    <input type="text" name="allowed_languages" value="{{ problem.allowed_languages if problem else 'python,c,cpp,java' }}" placeholder="python,c,cpp,java">
+    <p class="hint">내부 저장값은 python, c, cpp, java입니다. 화면에는 Python 3, C, C++17, Java 17로 표시됩니다.</p>
+    <label>문제 설명</label><textarea name="description" required>{{ problem.description if problem else '' }}</textarea>
+    <label>입력 설명</label><textarea name="input_description" required>{{ problem.input_description if problem else '' }}</textarea>
+    <label>출력 설명</label><textarea name="output_description" required>{{ problem.output_description if problem else '' }}</textarea>
+
+    <details class="sub-box question-card">
+        <summary>노트 작성</summary>
+        <p class="hint">문제와 직접 관련은 없지만, 출제자가 풀이자에게 전하고 싶은 말을 적습니다. 여러 개를 작성하려면 줄 하나에 --- 를 넣어 구분합니다.</p>
+        <label>노트</label>
+        <textarea name="notes_text" placeholder="예: 재미있게 풀어보세요.
+---
+이 문제는 수업 예제로 제작되었습니다.">{{ notes_text if notes_text is defined else '' }}</textarea>
+    </details>
+
+    <details class="sub-box question-card">
+        <summary>힌트 작성</summary>
+        <p class="hint">문제 풀이에 도움이 되는 힌트를 적습니다. 여러 개를 작성하려면 줄 하나에 --- 를 넣어 구분합니다.</p>
+        <label>힌트</label>
+        <textarea name="hints_text" placeholder="예: 입력 범위를 먼저 확인해보세요.
+---
+정렬을 사용하면 더 쉽게 풀 수 있습니다.">{{ hints_text if hints_text is defined else '' }}</textarea>
+    </details>
+
+    <h3>예제</h3>
+    <p class="hint">예제 입력과 예제 출력은 --- 줄로 구분합니다. 같은 순서끼리 한 줄의 예제 입력/출력 쌍으로 표시됩니다.</p>
+    <label>예제 입력</label><textarea name="sample_inputs">{{ sample_inputs if sample_inputs is defined else '' }}</textarea>
+    <label>예제 출력</label><textarea name="sample_outputs">{{ sample_outputs if sample_outputs is defined else '' }}</textarea>
+
+    <label>시간 제한</label><input type="number" name="time_limit" value="{{ problem.time_limit if problem else 2 }}" required>
+    <label>메모리 제한(MB)</label><input type="number" name="memory_limit" value="{{ problem.memory_limit if problem else 256 }}" required>
+    {% if not problem or can_manage_public_settings %}
+    <label><input type="checkbox" name="is_public" {% if not problem or problem.is_public %}checked{% endif %}> 일반 문제 목록에 공개</label>
+    {% endif %}
+    <label><input type="checkbox" name="is_judge_ready" {% if not problem or problem.is_judge_ready %}checked{% endif %}> 제출 가능</label>
+    <p class="hint">체크를 해제하면 지문은 공개되어도 채점 준비 중 상태가 되어 제출할 수 없습니다.</p>
+    {% if not problem or can_manage_public_settings %}
+    <label><input type="checkbox" name="force_private_submission" {% if problem and problem.force_private_submission %}checked{% endif %}> 제출 코드 강제 비공개</label>
+    <p class="hint">이 옵션을 켜면 유저가 제출 시 공개를 선택해도 관리자와 제출자 본인만 코드를 볼 수 있습니다.</p>
+    {% endif %}
+    {% if problem and problem.is_contest_only and can_manage_public_settings %}
+    <label><input type="checkbox" name="promote"> 대회 전용 문제를 일반 문제로 전환</label>
+    <p class="hint">OJ 관리자가 전환하면 공개 검토 표시는 사라지고 일반 문제 목록에 공개됩니다.</p>
+    {% endif %}
+    <label>테스트 입력</label>
+    <p class="hint">여러 테스트 케이스는 줄 하나에 --- 를 넣어 구분합니다. 저장 후 서버 재시작 없이 바로 채점에 반영됩니다.</p>
+    <textarea name="test_inputs" required>{{ test_inputs }}</textarea>
+    <label>테스트 출력</label>
+    <textarea name="test_outputs" required>{{ test_outputs }}</textarea>
+    <button type="submit">{% if problem %}수정 저장{% else %}문제 추가{% endif %}</button>
+</form>
+{% if problem %}
+<section id="testcases" class="box">
+    <h3>테스트케이스 개별 관리</h3>
+    <p class="hint">아래에서 테스트케이스를 개별 추가/수정/삭제할 수 있습니다. 변경 사항은 서버 재시작 없이 바로 채점에 반영됩니다.</p>
+    {% for tc in testcases %}
+    <details class="question-card">
+        <summary>#{{ tc.index }} 테스트케이스</summary>
+        <form action="/admin/problems/{{ problem.id }}/testcases/{{ tc.index }}/edit" method="post">
+            <label>입력</label>
+            <textarea name="input_text" class="short-code-textarea">{{ tc.input }}</textarea>
+            <label>출력</label>
+            <textarea name="output_text" class="short-code-textarea">{{ tc.output }}</textarea>
+            <button type="submit">수정 저장</button>
+        </form>
+        <form action="/admin/problems/{{ problem.id }}/testcases/{{ tc.index }}/delete" method="post" onsubmit="return confirm('이 테스트케이스를 삭제할까요?');">
+            <button type="submit" class="danger-button">삭제</button>
+        </form>
+    </details>
+    {% else %}
+    <p class="hint">등록된 테스트케이스가 없습니다.</p>
+    {% endfor %}
+    <details class="sub-box question-card" open>
+        <summary>새 테스트케이스 추가</summary>
+        <form action="/admin/problems/{{ problem.id }}/testcases/add" method="post">
+            <label>입력</label><textarea name="input_text" class="short-code-textarea"></textarea>
+            <label>출력</label><textarea name="output_text" class="short-code-textarea"></textarea>
+            <button type="submit">테스트케이스 추가</button>
+        </form>
+    </details>
+</section>
+<div class="box danger-box">
+    <h3>기존 제출 재채점</h3>
+    <p class="hint">문제 설명, 시간 제한, 메모리 제한, 테스트케이스를 수정한 뒤 이 문제의 기존 제출 결과를 다시 계산할 수 있습니다.</p>
+    <form action="/admin/problems/{{ problem.id }}/rejudge" method="post" onsubmit="return confirm('이 문제의 모든 기존 제출을 다시 채점할까요? 제출 수가 많으면 시간이 걸릴 수 있습니다.');">
+        <button type="submit">이 문제 기존 제출 재채점</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

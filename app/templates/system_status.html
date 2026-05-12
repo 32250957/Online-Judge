@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>시스템 상태</h2>
+<div class="grid two">
+    <section class="box">
+        <h3>DB 연결</h3>
+        <p class="result {{ 'AC' if db_ok else 'SE' }}">{{ '정상' if db_ok else '오류' }}</p>
+        {% if db_error %}<pre>{{ db_error }}</pre>{% endif %}
+    </section>
+    <section class="box">
+        <h3>Docker</h3>
+        <p class="result {{ 'AC' if docker_ok else 'SE' }}">{{ '사용 가능' if docker_ok else '확인 필요' }}</p>
+        <pre>{{ docker_message }}</pre>
+    </section>
+</div>
+<section class="box">
+    <h3>채점 큐</h3>
+    <p>대기: <b>{{ pending }}</b> / 채점 중: <b>{{ judging }}</b></p>
+</section>
+<section class="box">
+    <h3>채점 이미지</h3>
+    {% if images %}
+    <table><thead><tr><th>이미지</th><th>상태</th></tr></thead><tbody>
+    {% for image in images %}<tr><td>{{ image.name }}</td><td>{{ '있음' if image.found else '없음 또는 확인 실패' }}</td></tr>{% endfor %}
+    </tbody></table>
+    {% else %}<p class="hint">Docker가 확인되지 않아 이미지 상태를 조회하지 못했습니다.</p>{% endif %}
+</section>
+<section class="box">
+    <h3>최근 SE 제출</h3>
+    <table><thead><tr><th>제출</th><th>문제</th><th>언어</th><th>시간</th></tr></thead><tbody>
+    {% for s in recent_se %}<tr><td><a href="/submissions/{{ s.id }}">#{{ s.id }}</a></td><td>{{ s.problem_id }}</td><td>{{ language_label(s.language) }}</td><td>{{ s.created_at }}</td></tr>
+    {% else %}<tr><td colspan="4">최근 SE 제출이 없습니다.</td></tr>{% endfor %}
+    </tbody></table>
+</section>
+<section class="box">
+    <h3>최근 채점 로그</h3>
+    <table><thead><tr><th>시간</th><th>이벤트</th><th>제출</th><th>내용</th></tr></thead><tbody>
+    {% for log in recent_logs %}<tr><td>{{ log.created_at }}</td><td>{{ log.event }}</td><td>{{ log.submission_id or '-' }}</td><td><a href="/admin/judge-logs/{{ log.id }}">{{ log.message }}</a></td></tr>
+    {% else %}<tr><td colspan="4">로그가 없습니다.</td></tr>{% endfor %}
+    </tbody></table>
+</section>
+{% endblock %}

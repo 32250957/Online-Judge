@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>제출 결과 #{{ submission.id }}</h2>
+<section class="box">
+    <p><b>사용자:</b> {{ submission.user.username if submission.user else "-" }}</p>
+    <p><b>문제:</b> {% if contest_link %}{{ contest_link.label }}{% else %}{{ submission.problem_id }}{% endif %}</p>
+    <p><b>대회:</b> {{ submission.contest.title if submission.contest else "-" }}</p>
+    <p><b>언어:</b> {{ submission.language }}</p>
+    <p><b>상태:</b> <span id="judge-status">{{ submission.judge_status }}</span></p>
+    <p><b>결과:</b> <span id="judge-result" class="result {{ submission.result }}">{{ result_label(submission.result) }}</span></p>
+    <p><b>실행시간:</b> <span id="runtime-ms">{{ submission.runtime_ms }}</span> ms</p>
+    <p><b>메모리:</b> <span id="memory-kb">{{ submission.memory_kb }}</span> KB</p>
+    <p><b>코드 공개 설정:</b> {% if submission.contest_id %}대회 제출 비공개{% elif submission.problem.force_private_submission %}문제 강제 비공개{% else %}{{ visibility_label(submission.visibility) }}{% endif %}</p>
+{% if user and user.is_admin %}
+<form action="/admin/submissions/{{ submission.id }}/rejudge" method="post" class="inline-actions">
+    <button type="submit">이 제출 재채점</button>
+</form>
+<form action="/admin/submissions/{{ submission.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 제출 기록을 삭제할까요?');">
+    <button type="submit" class="danger">이 제출 삭제</button>
+</form>
+{% endif %}
+</section>
+{% if detail_message_visible %}
+<section class="box">
+    <h3>상세 채점 메시지</h3>
+    <pre id="submission-detail">{{ submission.detail }}</pre>
+</section>
+{% endif %}
+<section class="box">
+    <h3>제출 코드</h3>
+    {% if code_visible %}
+        <pre>{{ submission.code }}</pre>
+    {% else %}
+        <div class="error-box">이 제출 코드는 제출자 본인과 관리자만 확인할 수 있습니다.</div>
+    {% endif %}
+</section>
+
+{% if submission.judge_status not in ["DONE", "FAILED"] %}
+<script>
+const submissionId = {{ submission.id }};
+const RESULT_LABELS = {AC: "맞았습니다!!", RE: "런타임 에러", CE: "컴파일 에러", TLE: "시간 초과", MLE: "메모리 초과", WA: "틀렸습니다", WAITING: "채점 대기", JUDGING: "채점 중", SE: "시스템 에러"};
+function resultLabel(code) { return RESULT_LABELS[code] || code || "채점 대기"; }
+function applySubmissionStatus(data) {
+    document.getElementById("judge-status").textContent = data.judge_status;
+    const resultEl = document.getElementById("judge-result");
+    resultEl.textContent = resultLabel(data.result || "WAITING");
+    resultEl.className = `result ${data.result || ''}`;
+    document.getElementById("runtime-ms").textContent = data.runtime_ms ?? 0;
+    document.getElementById("memory-kb").textContent = data.memory_kb ?? 0;
+    const detailEl = document.getElementById("submission-detail");
+    if (detailEl && data.detail) detailEl.textContent = data.detail;
+}
+async function refreshSubmissionStatus() {
+    try {
+        const response = await fetch(`/api/submissions/${submissionId}/status`);
+        if (!response.ok) return;
+        const data = await response.json();
+        applySubmissionStatus(data);
+        if (data.done) clearInterval(window.ojSubmissionTimer);
+    } catch (e) {}
+}
+if (window.EventSource) {
+    const stream = new EventSource(`/api/submissions/${submissionId}/events`);
+    stream.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        applySubmissionStatus(data);
+        if (data.done) stream.close();
+    };
+    stream.onerror = () => {
+        stream.close();
+        window.ojSubmissionTimer = setInterval(refreshSubmissionStatus, 1000);
+        refreshSubmissionStatus();
+    };
+} else {
+    window.ojSubmissionTimer = setInterval(refreshSubmissionStatus, 1000);
+    refreshSubmissionStatus();
+}
+</script>
+{% endif %}
+{% endblock %}

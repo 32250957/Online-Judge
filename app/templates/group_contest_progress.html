@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="box">
+    <p><a href="/groups/{{ group.id }}#contests">← {{ group.name }} 그룹 대회 목록</a></p>
+    <h2>{{ group_contest.title }} 진행 현황</h2>
+    {{ group_contest.description|rich_text }}
+    <div class="inline-toolbar">
+        <a class="button secondary" href="/contests/{{ contest.id }}">대회 입장</a>
+        <a class="button secondary" href="/admin/group-contests/{{ group_contest.id }}/progress.csv">문제별 현황 CSV</a>
+        <a class="button secondary" href="/admin/group-contests/{{ group_contest.id }}/ranking.csv">순위 CSV</a>
+        {% if contest.score_enabled %}<a class="button secondary" href="/admin/group-contests/{{ group_contest.id }}/scores">점수표</a>{% endif %}
+    </div>
+</section>
+
+<section class="box">
+    <h3>문제별 정답자 / 미해결자 / 미제출자</h3>
+    {% for row in progress_rows %}
+    <details class="question-card">
+        <summary><b>{{ row.problem_id }}</b> {{ row.problem.title if row.problem else '' }} — 정답 {{ row.solved|length }}명 / 미해결 {{ row.unsolved|length }}명 / 미제출 {{ row.not_submitted|length }}명</summary>
+        <div class="three-column-grid">
+            <div><h4>정답자</h4><p>{{ row.solved|map(attribute='username')|join(', ') if row.solved else '-' }}</p></div>
+            <div><h4>미해결자</h4><p>{{ row.unsolved|map(attribute='username')|join(', ') if row.unsolved else '-' }}</p></div>
+            <div><h4>미제출자</h4><p>{{ row.not_submitted|map(attribute='username')|join(', ') if row.not_submitted else '-' }}</p></div>
+        </div>
+    </details>
+    {% else %}
+    <p class="hint">연결된 문제가 없습니다.</p>
+    {% endfor %}
+</section>
+{% endblock %}
