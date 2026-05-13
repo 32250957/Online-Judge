@@ -40,6 +40,65 @@ from fastapi.templating import Jinja2Templates
 from fastapi.exception_handlers import http_exception_handler
 
 SUBMIT_BAN_SECONDS_DEFAULT = 10
+ACCOUNT_ALLOWED_PATTERN = re.compile(r"^[A-Za-z0-9`~!@#$%^&*|\\\'\";:₩\\?]+$")
+ACCOUNT_ALLOWED_HINT = "영어 대소문자, 숫자, 특수문자 ` ~ ! @ # $ % ^ & * | ' \" ; : ₩ \\ ? 만 사용할 수 있습니다."
+DELETED_USERNAME_PREFIX = "Deleted_User_"
+
+
+def validate_username_value(username: str) -> str | None:
+    if not (4 <= len(username) <= 20):
+        return "아이디는 4자 이상 20자 이하로 입력해야 합니다."
+    if ACCOUNT_ALLOWED_PATTERN.fullmatch(username) is None:
+        return "아이디에는 " + ACCOUNT_ALLOWED_HINT
+    if username.startswith(DELETED_USERNAME_PREFIX):
+        return f"{DELETED_USERNAME_PREFIX}로 시작하는 아이디는 사용할 수 없습니다."
+    return None
+
+
+def validate_password_value(password: str) -> str | None:
+    if not (8 <= len(password) <= 20):
+        return "비밀번호는 8자 이상 20자 이하로 입력해야 합니다."
+    if ACCOUNT_ALLOWED_PATTERN.fullmatch(password) is None:
+        return "비밀번호에는 " + ACCOUNT_ALLOWED_HINT
+    return None
+
+
+def deleted_username_for(user_id: int) -> str:
+    return f"{DELETED_USERNAME_PREFIX}{user_id}"
+
+
+def display_username(user: Optional[User]) -> str:
+    if user is None:
+        return "-"
+    if getattr(user, "is_deleted", False):
+        return "탈퇴한 사용자"
+    return user.username
+
+
+def active_user_query(db: Session):
+    return db.query(User).filter(User.is_deleted == False)  # noqa: E712
+
+
+def count_active_group_members(group: Group) -> int:
+    return sum(1 for member in (group.members or []) if member.user and not member.user.is_deleted and not member.user.is_admin)
+
+
+def delete_user_account(db: Session, target: User) -> None:
+    # 소프트 탈퇴 처리: 제출/게시글/댓글은 유지하고, 아이디만 회수 가능하게 변경한다.
+    # 화면 표시 이름은 템플릿 헬퍼에서 "탈퇴한 사용자"로 숨긴다.
+    target.username = deleted_username_for(target.id)
+    target.password_hash = hash_password(uuid.uuid4().hex + uuid.uuid4().hex)
+    target.is_admin = False
+    target.is_deleted = True
+    target.deleted_at = now()
+    target.submit_banned_until = None
+    target.ban_reason = "탈퇴한 계정"
+    target.must_change_password = False
+    target.profile_background_url = ""
+    target.full_name = ""
+    target.student_id = ""
+    db.query(GroupJoinRequest).filter(GroupJoinRequest.user_id == target.id).delete(synchronize_session=False)
+    db.query(Message).filter(Message.user_id == target.id).delete(synchronize_session=False)
 
 
 ensure_postgresql_schema(engine)
@@ -66,6 +125,8 @@ def rich_text(value):
 
 templates.env.filters["rich_text"] = rich_text
 templates.env.globals["language_label"] = language_label
+templates.env.globals["display_username"] = display_username
+templates.env.globals["count_active_group_members"] = count_active_group_members
 
 RESULT_LABELS = {
     "AC": "맞았습니다!!",
@@ -213,6 +274,9 @@ def get_current_user(request: Request, db: Session):
     if user_id is None:
         return None
     user = db.query(User).filter(User.id == user_id).first()
+    if user and getattr(user, "is_deleted", False):
+        request.session.clear()
+        return None
     return cleanup_expired_submit_ban(user, db)
 
 
@@ -441,7 +505,7 @@ def create_messages_for_users(db: Session, users: list[User], title: str, conten
 
 
 def notify_admins(db: Session, title: str, content: str = "", message_type: str = "admin_notice", related_group_id: int | None = None, related_submission_id: int | None = None) -> int:
-    admins = db.query(User).filter(User.is_admin == True).order_by(User.id.asc()).all()  # noqa: E712
+    admins = db.query(User).filter(User.is_admin == True, User.is_deleted == False).order_by(User.id.asc()).all()  # noqa: E712
     return create_messages_for_users(db, admins, title, content, message_type, related_group_id=related_group_id, related_submission_id=related_submission_id)
 
 
@@ -1536,6 +1600,13 @@ def register_page(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/register")
 def register(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    username = username.strip()
+    username_error = validate_username_value(username)
+    if username_error:
+        return templates.TemplateResponse("register.html", {"request": request, "user": None, "error": username_error})
+    password_error = validate_password_value(password)
+    if password_error:
+        return templates.TemplateResponse("register.html", {"request": request, "user": None, "error": password_error})
     if db.query(User).filter(User.username == username).first():
         return templates.TemplateResponse("register.html", {"request": request, "user": None, "error": "이미 존재하는 아이디입니다."})
     db.add(User(username=username, password_hash=hash_password(password), is_admin=False))
@@ -1553,7 +1624,7 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if user is None or not verify_password(password, user.password_hash):
+    if user is None or getattr(user, "is_deleted", False) or not verify_password(password, user.password_hash):
         return templates.TemplateResponse("login.html", {"request": request, "user": None, "error": "아이디 또는 비밀번호가 올바르지 않습니다."})
     request.session["user_id"] = user.id
     request.session["username"] = user.username
@@ -1574,8 +1645,9 @@ def change_password_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/change-password")
 def change_password(request: Request, current_password: str = Form(""), new_password: str = Form(...), new_password_confirm: str = Form(...), db: Session = Depends(get_db)):
     user = require_login(request, db)
-    if len(new_password) < 4:
-        return templates.TemplateResponse("change_password.html", {"request": request, "user": user, "error": "새 비밀번호는 4자 이상이어야 합니다."})
+    password_error = validate_password_value(new_password)
+    if password_error:
+        return templates.TemplateResponse("change_password.html", {"request": request, "user": user, "error": password_error})
     if new_password != new_password_confirm:
         return templates.TemplateResponse("change_password.html", {"request": request, "user": user, "error": "새 비밀번호 확인이 일치하지 않습니다."})
     if not getattr(user, "must_change_password", False) and not verify_password(current_password, user.password_hash):
@@ -2555,7 +2627,7 @@ def admin_backups(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
     checks = collect_system_checks(db)
     counts = {
-        "users": db.query(User).count(),
+        "users": db.query(User).filter(User.is_admin == False, User.is_deleted == False).count(),  # noqa: E712
         "problems": db.query(Problem).count(),
         "submissions": db.query(Submission).count(),
         "contests": db.query(Contest).count(),
@@ -2617,7 +2689,7 @@ def admin_page(request: Request, db: Session = Depends(get_db)):
         "request": request,
         "user": user,
         "problem_count": db.query(Problem).count(),
-        "user_count": db.query(User).count(),
+        "user_count": db.query(User).filter(User.is_admin == False, User.is_deleted == False).count(),  # noqa: E712
         "submission_count": db.query(Submission).count(),
         "today_submission_count": db.query(Submission).filter(Submission.created_at >= today_start).count(),
         "contest_count": db.query(Contest).count(),
@@ -2641,8 +2713,8 @@ def admin_page(request: Request, db: Session = Depends(get_db)):
 @app.get("/admin/security", response_class=HTMLResponse)
 def admin_security_page(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
-    admins = db.query(User).filter(User.is_admin == True).order_by(User.id.asc()).all()  # noqa: E712
-    all_users = db.query(User).order_by(User.id.asc()).all()
+    admins = db.query(User).filter(User.is_admin == True, User.is_deleted == False).order_by(User.id.asc()).all()  # noqa: E712
+    all_users = db.query(User).filter(User.is_deleted == False).order_by(User.id.asc()).all()
     return templates.TemplateResponse("admin_security.html", {
         "request": request,
         "user": user,
@@ -2717,8 +2789,9 @@ def admin_security_update_password(
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    password_error = validate_password_value(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     target.password_hash = hash_password(new_password)
     target.must_change_password = bool(force_change)
     if target.id != admin.id:
@@ -2789,7 +2862,7 @@ def admin_audit_logs(
 def admin_performance_page(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
     table_counts = [
-        {"name": "users", "label": "회원", "count": db.query(User).count()},
+        {"name": "users", "label": "회원", "count": db.query(User).filter(User.is_admin == False, User.is_deleted == False).count()},  # noqa: E712
         {"name": "problems", "label": "문제", "count": db.query(Problem).count()},
         {"name": "submissions", "label": "제출", "count": db.query(Submission).count()},
         {"name": "contests", "label": "대회", "count": db.query(Contest).count()},
@@ -4962,6 +5035,31 @@ def update_profile_background(username: str, request: Request, profile_backgroun
     db.commit()
     return RedirectResponse(url=f"/users/{target.username}", status_code=303)
 
+@app.post("/users/{username}/delete")
+def delete_my_account(username: str, request: Request, password: str = Form(...), confirm_text: str = Form(...), db: Session = Depends(get_db)):
+    user = require_login(request, db)
+    target = db.query(User).filter(User.username == username).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id != target.id:
+        raise HTTPException(status_code=403, detail="본인 계정만 탈퇴할 수 있습니다.")
+    if target.is_admin and db.query(User).filter(User.is_admin == True, User.id != target.id).count() == 0:  # noqa: E712
+        raise HTTPException(status_code=400, detail="마지막 관리자 계정은 탈퇴할 수 없습니다.")
+    if confirm_text.strip() != "탈퇴하겠습니다.":
+        return templates.TemplateResponse("user_profile.html", {
+            "request": request, "user": user, "target": target, "solved_ids": [], "tried_ids": [], "tried_only_ids": [],
+            "wrong_count": 0, "ac_count": 0, "result_rows": [], "recent": [],
+            "delete_error": "확인 문구를 정확히 입력해야 합니다. 문구: 탈퇴하겠습니다."
+        })
+    if not verify_password(password, target.password_hash):
+        raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다.")
+    audit_log(db, request, user, "delete_account", "user", target.id, f"사용자 탈퇴: {target.username}")
+    delete_user_account(db, target)
+    db.commit()
+    request.session.clear()
+    return RedirectResponse(url="/", status_code=303)
+
+
 @app.get("/admin/users", response_class=HTMLResponse)
 def admin_users(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
@@ -4977,6 +5075,8 @@ def admin_update_user_profile(user_id: int, request: Request, full_name: str = F
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="탈퇴한 계정은 수정할 수 없습니다.")
     target.full_name = full_name.strip()[:100]
     target.student_id = student_id.strip()[:50]
     db.commit()
@@ -4989,10 +5089,13 @@ def admin_reset_user_password(user_id: int, request: Request, new_password: str 
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="탈퇴한 계정은 수정할 수 없습니다.")
     if target.id == admin.id:
         raise HTTPException(status_code=400, detail="본인 비밀번호는 이 화면에서 초기화하지 않습니다.")
-    if len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    password_error = validate_password_value(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     target.password_hash = hash_password(new_password)
     target.must_change_password = True
     create_message(db, target.id, "비밀번호 초기화", "관리자가 비밀번호를 초기화했습니다. 로그인 후 비밀번호를 변경해 주세요.", "notice")
@@ -5033,6 +5136,9 @@ def admin_bulk_create_users(request: Request, csv_text: str = Form(""), csv_file
     created = 0
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
+        if validate_username_value(row["username"]) or validate_password_value(row["password"]):
+            skipped += 1
+            continue
         if db.query(User).filter(User.username == row["username"]).first():
             skipped += 1
             continue
@@ -5064,8 +5170,9 @@ def admin_bulk_update_user_profiles(request: Request, csv_text: str = Form(""), 
 @app.post("/admin/users/bulk-reset-password")
 def admin_bulk_reset_user_passwords(request: Request, user_ids: list[int] = Form([]), new_password: str = Form("changeme1234"), db: Session = Depends(get_db)):
     admin = require_admin(request, db)
-    if len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    password_error = validate_password_value(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     for user_id in user_ids:
         if user_id == admin.id:
             continue
@@ -5084,6 +5191,8 @@ def toggle_admin(user_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="탈퇴한 계정은 수정할 수 없습니다.")
     if target.id != admin.id:
         target.is_admin = not target.is_admin
         db.commit()
@@ -5096,6 +5205,8 @@ def ban_submit(user_id: int, request: Request, seconds: int = Form(...), reason:
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="탈퇴한 계정은 수정할 수 없습니다.")
     if target.id != admin.id:
         target.submit_banned_until = now() + timedelta(seconds=seconds)
         target.ban_reason = reason or f"{seconds}초 제출 제한"
@@ -5110,7 +5221,29 @@ def unban_submit(user_id: int, request: Request, db: Session = Depends(get_db)):
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="탈퇴한 계정은 수정할 수 없습니다.")
     target.submit_banned_until = None
     target.ban_reason = None
     db.commit()
     return RedirectResponse(url="/admin/users", status_code=303)
+
+@app.post("/admin/users/{user_id}/delete")
+def admin_delete_user(user_id: int, request: Request, confirm_text: str = Form(...), db: Session = Depends(get_db)):
+    admin = require_admin(request, db)
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if getattr(target, "is_deleted", False):
+        raise HTTPException(status_code=400, detail="이미 탈퇴 처리된 계정입니다.")
+    if target.id == admin.id:
+        raise HTTPException(status_code=400, detail="본인 계정은 회원 관리 화면에서 삭제할 수 없습니다.")
+    if target.is_admin and db.query(User).filter(User.is_admin == True, User.id != target.id).count() == 0:  # noqa: E712
+        raise HTTPException(status_code=400, detail="마지막 관리자 계정은 삭제할 수 없습니다.")
+    if confirm_text.strip() != target.username:
+        raise HTTPException(status_code=400, detail="삭제 확인을 위해 대상 아이디를 정확히 입력해야 합니다.")
+    audit_log(db, request, admin, "admin_delete_user", "user", target.id, f"관리자 회원 삭제: {target.username}")
+    delete_user_account(db, target)
+    db.commit()
+    return RedirectResponse(url="/admin/users", status_code=303)
+

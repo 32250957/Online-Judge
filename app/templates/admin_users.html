@@ -51,23 +51,24 @@
     <button type="button" onclick="selectFilteredUsers(true)">필터 결과 전체 선택</button>
     <button type="button" onclick="selectFilteredUsers(false)">필터 결과 선택 해제</button>
     <span class="hint" id="userFilterCount"></span>
-    <input type="text" name="new_password" form="adminBulkUserForm" value="changeme1234" placeholder="초기화 비밀번호">
+    <input type="text" name="new_password" form="adminBulkUserForm" value="changeme1234" minlength="8" maxlength="20" placeholder="초기화 비밀번호">
     <button type="submit" form="adminBulkUserForm" formaction="/admin/users/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
 </div>
 <table>
-    <thead><tr><th>선택</th><th>ID</th><th>아이디</th><th>이름/학번</th><th>관리자</th><th>비번 변경</th><th>제출 제한</th><th>관리자 변경</th><th>관리</th></tr></thead>
+    <thead><tr><th>선택</th><th>ID</th><th>아이디</th><th>상태</th><th>이름/학번</th><th>관리자</th><th>비번 변경</th><th>제출 제한</th><th>관리자 변경</th><th>관리</th></tr></thead>
     <tbody>
         {% for item in users %}
         <tr class="user-row" data-username="{{ item.username|lower }}" data-full-name="{{ item.full_name|lower }}" data-student-id="{{ item.student_id|lower }}" data-user-id="{{ item.id }}" data-has-full-name="{{ '1' if item.full_name else '0' }}" data-has-student-id="{{ '1' if item.student_id else '0' }}">
-            <td>{% if item.id != user.id %}<input type="checkbox" name="user_ids" value="{{ item.id }}" form="adminBulkUserForm">{% endif %}</td>
+            <td>{% if item.id != user.id and not item.is_deleted %}<input type="checkbox" name="user_ids" value="{{ item.id }}" form="adminBulkUserForm">{% endif %}</td>
             <td>{{ item.id }}</td>
             <td>{{ item.username }}</td>
+            <td>{% if item.is_deleted %}<span class="badge danger">탈퇴</span>{% else %}활성{% endif %}</td>
             <td>
-                <form action="/admin/users/{{ item.id }}/profile" method="post" class="inline-form stacked-inline-form">
+                {% if not item.is_deleted %}<form action="/admin/users/{{ item.id }}/profile" method="post" class="inline-form stacked-inline-form">
                     <input type="text" name="full_name" value="{{ item.full_name }}" placeholder="이름">
                     <input type="text" name="student_id" value="{{ item.student_id }}" placeholder="학번">
                     <button type="submit">저장</button>
-                </form>
+                </form>{% else %}-{% endif %}
             </td>
             <td>{{ "관리자" if item.is_admin else "일반" }}</td>
             <td>{{ "필요" if item.must_change_password else "-" }}</td>
@@ -77,12 +78,12 @@
                 {% else %}없음{% endif %}
             </td>
             <td>
-                {% if item.id != user.id %}
+                {% if item.id != user.id and not item.is_deleted %}
                 <form action="/admin/users/{{ item.id }}/toggle-admin" method="post"><button type="submit">{% if item.is_admin %}관리자 해제{% else %}관리자 지정{% endif %}</button></form>
                 {% else %}본인{% endif %}
             </td>
             <td>
-                {% if item.id != user.id %}
+                {% if item.id != user.id and not item.is_deleted %}
                 <details>
                     <summary>관리 열기</summary>
                     <form action="/admin/users/{{ item.id }}/ban-submit" method="post" class="inline-form stacked-inline-form">
@@ -92,8 +93,12 @@
                     </form>
                     <form action="/admin/users/{{ item.id }}/unban-submit" method="post"><button type="submit">제한 해제</button></form>
                     <form action="/admin/users/{{ item.id }}/reset-password" method="post" class="inline-form stacked-inline-form" onsubmit="return confirm('이 사용자의 비밀번호를 초기화할까요?');">
-                        <input type="text" name="new_password" placeholder="새 비밀번호" required>
+                        <input type="text" name="new_password" minlength="8" maxlength="20" placeholder="새 비밀번호" required>
                         <button type="submit">비밀번호 초기화</button>
+                    </form>
+                    <form action="/admin/users/{{ item.id }}/delete" method="post" class="inline-form stacked-inline-form" onsubmit="return confirm('정말 이 회원을 탈퇴 처리할까요? 제출 기록/게시글/댓글은 유지되고 작성자는 탈퇴한 사용자로 표시됩니다.');">
+                        <input type="text" name="confirm_text" placeholder="삭제하려면 아이디 입력: {{ item.username }}" required>
+                        <button type="submit" class="danger">회원 삭제</button>
                     </form>
                 </details>
                 {% else %}본인 관리 제한{% endif %}

@@ -25,7 +25,7 @@
         </details>
         {% endif %}
     </div>
-    <p class="hint">{{ board_name }} · {{ post.author.username if post.author else '-' }} · {{ post.created_at }}</p>
+    <p class="hint">{{ board_name }} · {{ display_username(post.author) }} · {{ post.created_at }}</p>
     <div class="post-content">{{ post.content|rich_text }}</div>
 </section>
 
@@ -33,7 +33,7 @@
     <h3>댓글</h3>
     {% for comment in comments %}
     <div class="comment-card">
-        <p class="hint">{{ comment.author.username if comment.author else '-' }} · {{ comment.created_at }}</p>
+        <p class="hint">{{ display_username(comment.author) }} · {{ comment.created_at }}</p>
         <div>{{ comment.content|rich_text }}</div>
         {% if user and (user.is_admin or can_pin_post or comment.author_id == user.id) %}
         <form class="inline-actions" action="/groups/{{ group.id }}/board/{{ post.id }}/comments/{{ comment.id }}/delete" method="post" onsubmit="return confirm('이 댓글을 삭제할까요?');">

@@ -62,7 +62,7 @@
         {% for message in recent_messages %}
         <tr>
             <td>{{ message.id }}</td>
-            <td>{{ message.user.username if message.user else message.user_id }}</td>
+            <td>{{ display_username(message.user) }}</td>
             <td>{{ message.title }}</td>
             <td>{{ message.message_type }}</td>
             <td>{{ message.created_at }}</td>

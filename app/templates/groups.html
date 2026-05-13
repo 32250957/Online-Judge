@@ -20,10 +20,10 @@
             <td>{{ group.id }}{% if active_group_ids is defined and group.id in active_group_ids %}<br><span class="badge">대회 진행 중</span>{% endif %}</td>
             <td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td>
             <td>{{ group.description|rich_text }}</td>
-            <td>{{ group.owner.username if group.owner else "-" }}</td>
+            <td>{{ display_username(group.owner) }}</td>
             <td>{{ "공개" if group.is_public else "비공개" }}</td>
             <td>{{ "학교 분반" if group.is_school_group else "일반" }}</td>
-            <td>{{ group.members|length }}</td>
+            <td>{{ count_active_group_members(group) }}</td>
         </tr>
         {% else %}
         <tr><td colspan="7">아직 생성된 그룹이 없습니다.</td></tr>

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="profile-hero box" {% if target.profile_background_url %}style="background-image: linear-gradient(rgba(0,0,0,.45), rgba(0,0,0,.45)), url('{{ target.profile_background_url }}');"{% endif %}>
-    <h2>{{ target.username }}님의 프로필</h2>
+    <h2>{{ display_username(target) }}님의 프로필</h2>
     {% if target.full_name or target.student_id %}<p>{% if target.full_name %}<b>이름:</b> {{ target.full_name }} {% endif %}{% if target.student_id %}<b>학번:</b> {{ target.student_id }}{% endif %}</p>{% endif %}
     <p><b>가입일:</b> {{ target.created_at }}</p>
     <div class="stats-grid">
@@ -21,6 +21,21 @@
         <label>배경 이미지 URL</label>
         <input type="text" name="profile_background_url" value="{{ target.profile_background_url }}" placeholder="https://...">
         <button type="submit">배경 저장</button>
+    </form>
+</section>
+{% endif %}
+
+{% if user and user.id == target.id %}
+<section class="box danger-zone">
+    <h3>계정 탈퇴</h3>
+    {% if delete_error %}<div class="error-box">{{ delete_error }}</div>{% endif %}
+    <p class="hint">탈퇴하면 로그인할 수 없고 아이디는 다른 사용자가 다시 사용할 수 있습니다. 기존 제출 기록, 게시글, 댓글은 유지되며 작성자는 탈퇴한 사용자로 표시됩니다.</p>
+    <form action="/users/{{ target.username }}/delete" method="post" class="small-form" onsubmit="return confirm('정말 계정을 탈퇴할까요? 이 작업은 되돌릴 수 없습니다.');">
+        <label>현재 비밀번호</label>
+        <input type="password" name="password" required>
+        <label>확인 문구</label>
+        <input type="text" name="confirm_text" placeholder="탈퇴하겠습니다." required>
+        <button type="submit" class="danger">계정 탈퇴</button>
     </form>
 </section>
 {% endif %}

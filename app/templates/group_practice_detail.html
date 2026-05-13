@@ -77,7 +77,7 @@
         <tbody>
         {% for row in board %}
             <tr>
-                <td>{{ row.user.username if row.user else '-' }}</td>
+                <td>{{ display_username(row.user) }}</td>
                 <td>{{ row.solved_count }}</td>
                 {% for cell in row.cells %}<td>{% if cell.solved %}AC / {{ cell.attempts }}회{% elif cell.attempts > 0 %}시도 {{ cell.attempts }}회{% else %}-{% endif %}</td>{% endfor %}
             </tr>

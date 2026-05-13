@@ -43,7 +43,7 @@ services:
       OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
     ports:
-      - "80:8000"
+      - "8000:8000"
     volumes:
       - ./problems:/app/problems
       - ./uploads:/app/uploads

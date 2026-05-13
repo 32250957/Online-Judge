@@ -16,6 +16,8 @@ class User(Base):
     full_name = Column(String(100), nullable=False, default="")
     student_id = Column(String(50), nullable=False, default="")
     must_change_password = Column(Boolean, nullable=False, default=False)
+    is_deleted = Column(Boolean, nullable=False, default=False)
+    deleted_at = Column(DateTime(timezone=False), nullable=True)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 class Problem(Base):

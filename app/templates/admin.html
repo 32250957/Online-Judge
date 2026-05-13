@@ -65,7 +65,7 @@
         <thead><tr><th>그룹</th><th>소유자</th><th>상태</th></tr></thead>
         <tbody>
         {% for group in active_groups %}
-        <tr class="active-group-row"><td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td><td>{{ group.owner.username if group.owner else group.owner_id }}</td><td><span class="badge">진행 중인 대회 있음</span></td></tr>
+        <tr class="active-group-row"><td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td><td>{{ display_username(group.owner) }}</td><td><span class="badge">진행 중인 대회 있음</span></td></tr>
         {% else %}
         <tr><td colspan="3">현재 진행 중인 그룹 대회가 없습니다.</td></tr>
         {% endfor %}
@@ -102,7 +102,7 @@
         {% for group in school_group_pending %}
         <tr>
             <td><a href="/groups/{{ group.id }}">{{ group.name }}</a></td>
-            <td>{{ group.owner.username if group.owner else group.owner_id }}</td>
+            <td>{{ display_username(group.owner) }}</td>
             <td>{{ group.school_group_request_reason }}</td>
             <td>{% if group.school_group_request_file_path %}<a href="{{ group.school_group_request_file_path }}" target="_blank">{{ group.school_group_request_file_name or '첨부파일' }}</a>{% else %}-{% endif %}</td>
             <td>
@@ -153,7 +153,7 @@
             <thead><tr><th>#</th><th>사용자</th><th>문제</th><th>결과</th></tr></thead>
             <tbody>
             {% for s in recent_submissions %}
-                <tr><td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td><td>{{ s.user.username if s.user else '-' }}</td><td>{{ s.problem_id }}</td><td class="result {{ s.result }}">{{ result_label(s.result) }}</td></tr>
+                <tr><td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td><td>{{ display_username(s.user) }}</td><td>{{ s.problem_id }}</td><td class="result {{ s.result }}">{{ result_label(s.result) }}</td></tr>
             {% else %}
                 <tr><td colspan="4">제출이 없습니다.</td></tr>
             {% endfor %}

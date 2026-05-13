@@ -12,9 +12,11 @@ ensure_postgresql_schema(engine)
 
 db = SessionLocal()
 try:
-    admin = db.query(User).filter(User.username == "admin").first()
+    default_admin_username = "geumyeom"
+    default_admin_password = "Ojgeumyeom9853"
+    admin = db.query(User).filter(User.username == default_admin_username).first()
     if admin is None:
-        db.add(User(username="admin", password_hash=hash_password("admin1234"), is_admin=True))
+        db.add(User(username=default_admin_username, password_hash=hash_password(default_admin_password), is_admin=True))
 
     problems_path = Path("problems")
     if problems_path.exists():
@@ -59,4 +61,4 @@ finally:
     db.close()
 
 print("PostgreSQL database initialized.")
-print("Admin account: admin / admin1234")
+print("Admin account: geumyeom / Ojgeumyeom9853")

@@ -2,7 +2,7 @@
 {% block content %}
 <h2>제출 결과 #{{ submission.id }}</h2>
 <section class="box">
-    <p><b>사용자:</b> {{ submission.user.username if submission.user else "-" }}</p>
+    <p><b>사용자:</b> {{ display_username(submission.user) }}</p>
     <p><b>문제:</b> {% if contest_link %}{{ contest_link.label }}{% else %}{{ submission.problem_id }}{% endif %}</p>
     <p><b>대회:</b> {{ submission.contest.title if submission.contest else "-" }}</p>
     <p><b>언어:</b> {{ submission.language }}</p>

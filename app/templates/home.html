@@ -14,7 +14,7 @@
     <section class="box">
         <h3>공지사항</h3>
         {% for post in notices %}
-        <p><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a><br><span class="hint">{{ post.created_at }} · {{ post.author.username if post.author else '-' }}</span></p>
+        <p><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a><br><span class="hint">{{ post.created_at }} · {{ display_username(post.author) }}</span></p>
         {% else %}<p class="hint">등록된 공지사항이 없습니다.</p>{% endfor %}
     </section>
     <section class="box">

@@ -3,7 +3,7 @@
 <section class="box">
     <h2>{{ group.name }}</h2>
     {{ group.description|rich_text }}
-    <p><b>소유자:</b> {{ group.owner.username if group.owner else "-" }}</p>
+    <p><b>소유자:</b> {{ display_username(group.owner) }}</p>
     <p><b>공개 여부:</b> {{ "공개" if group.is_public else "비공개" }}</p>
     <p><b>학교 분반 그룹:</b> {{ "활성화" if group.is_school_group else "미활성화" }}{% if group.school_group_request_status == "pending" %} <span class="hint">(승인 대기 중)</span>{% elif group.school_group_request_status == "rejected" %} <span class="hint">(최근 신청 거절)</span>{% endif %}</p>
     {% if can_manage %}
@@ -106,9 +106,10 @@
             <thead><tr>{% if can_manage %}<th>선택</th>{% endif %}<th>아이디</th><th>이름</th><th>학번</th><th>역할</th><th>가입일</th>{% if can_manage_members %}<th>개별 권한</th>{% endif %}</tr></thead>
             <tbody>
                 {% for member in group.members|sort(attribute='user.username') %}
+                {% if member.user and not member.user.is_deleted and not member.user.is_admin %}
                 <tr class="group-member-row" data-username="{{ (member.user.username if member.user else member.user_id)|string|lower }}" data-full-name="{{ (member.user.full_name if member.user else '')|lower }}" data-student-id="{{ (member.user.student_id if member.user else '')|lower }}" data-has-full-name="{{ '1' if member.user and member.user.full_name else '0' }}" data-has-student-id="{{ '1' if member.user and member.user.student_id else '0' }}">
                     {% if can_manage %}<td>{% if member.user_id != group.owner_id %}<input type="checkbox" name="member_ids" value="{{ member.user_id }}" form="memberBulkForm">{% endif %}</td>{% endif %}
-                    <td>{{ member.user.username if member.user else member.user_id }}</td>
+                    <td>{{ display_username(member.user) }}</td>
                     <td>{{ member.user.full_name if member.user else '-' }}</td>
                     <td>{{ member.user.student_id if member.user else '-' }}</td>
                     <td>{{ "소유자" if member.role == "owner" else ("관리자" if member.role == "admin" else "회원") }}</td>
@@ -127,6 +128,7 @@
                     </td>
                     {% endif %}
                 </tr>
+                {% endif %}
                 {% else %}
                 <tr><td colspan="{% if can_manage %}7{% else %}5{% endif %}">회원이 없습니다.</td></tr>
                 {% endfor %}
@@ -188,7 +190,7 @@ student01,1234,홍길동,10101"></textarea>
         <summary>가입 신청 관리</summary>
         {% for req in join_requests %}
         <div class="question-card">
-            <p>{{ req.user.username if req.user else req.user_id }} / {{ req.created_at }}</p>
+            <p>{{ display_username(req.user) }} / {{ req.created_at }}</p>
             <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/approve" method="post"><button type="submit">승인</button></form>
             <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/reject" method="post"><button type="submit">거절</button></form>
         </div>
@@ -412,7 +414,7 @@ student01,1234,홍길동,10101"></textarea>
             <td>{{ post.display_number or loop.index }}</td>
             <td>{{ GROUP_BOARD_TYPES.get(post.board_type, post.board_type) }}</td>
             <td><a href="/groups/{{ group.id }}/board/{{ post.id }}">{{ post.title }}</a></td>
-            <td>{{ post.author.username if post.author else '-' }}</td>
+            <td>{{ display_username(post.author) }}</td>
             <td>{{ post.created_at }}</td>
         </tr>
         {% else %}<tr><td colspan="5">그룹 게시글이 없습니다.</td></tr>{% endfor %}

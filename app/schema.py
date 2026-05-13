@@ -6,7 +6,7 @@ from sqlalchemy.engine import Engine
 from app.database import Base
 
 DATETIME_COLUMNS = [
-    ("users", "submit_banned_until"), ("users", "created_at"),
+    ("users", "submit_banned_until"), ("users", "deleted_at"), ("users", "created_at"),
     ("contests", "start_time"), ("contests", "end_time"), ("contests", "created_at"),
     ("submissions", "created_at"),
     ("contest_questions", "created_at"), ("contest_questions", "answered_at"),
@@ -70,6 +70,8 @@ POSTGRES_COLUMN_MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100) NOT NULL DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id VARCHAR(50) NOT NULL DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITHOUT TIME ZONE",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_school_group BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS school_group_request_status VARCHAR(30) NOT NULL DEFAULT 'none'",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS school_group_request_reason TEXT NOT NULL DEFAULT ''",
@@ -105,6 +107,7 @@ KNOWN_TABLE_COLUMNS = {
     "contests": {"id", "display_number", "title", "description", "start_time", "end_time", "is_public", "is_ended", "is_exam_mode", "hide_ranking", "result_display_mode", "score_enabled", "created_at"},
     "group_contests": {"id", "display_number", "group_id", "contest_id", "title", "description", "created_at"},
     "group_practices": {"id", "group_id", "title", "description", "start_time", "end_time", "created_at"},
+    "users": {"id", "username", "password_hash", "is_admin", "submit_banned_until", "ban_reason", "profile_background_url", "full_name", "student_id", "must_change_password", "is_deleted", "deleted_at", "created_at"},
     "groups": {"id", "name", "description", "owner_id", "is_public", "is_school_group", "school_group_request_status", "school_group_request_reason", "school_group_request_file_path", "school_group_request_file_name", "created_at"},
     "board_posts": {"id", "display_number", "board_scope", "board_type", "group_id", "author_id", "title", "content", "is_pinned", "created_at", "updated_at"},
     "problems": {"id", "title", "description", "input_description", "output_description", "time_limit", "memory_limit", "is_contest_only", "is_public", "force_private_submission", "is_judge_ready", "difficulty", "tags", "source", "problem_author", "error_finder", "typo_finder", "allowed_languages", "origin_type", "origin_group_id", "origin_contest_id", "review_status", "display_code"},

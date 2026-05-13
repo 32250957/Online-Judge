@@ -33,7 +33,7 @@
         <td>{{ post.display_number or post.id }}</td>
         <td>{{ board_types.get(post.board_type, post.board_type) }}</td>
         <td><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a></td>
-        <td>{{ post.author.username if post.author else '-' }}</td>
+        <td>{{ display_username(post.author) }}</td>
         <td>{{ post.created_at }}</td>
     </tr>
     {% else %}<tr><td colspan="5">게시글이 없습니다.</td></tr>{% endfor %}

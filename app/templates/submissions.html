@@ -57,7 +57,7 @@
         {% for s in submissions %}
         <tr data-submission-id="{{ s.id }}" data-live="{{ 1 if s.judge_status not in ['DONE', 'FAILED'] else 0 }}">
             <td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td>
-            <td>{{ s.user.username if s.user else "-" }}</td>
+            <td>{{ display_username(s.user) }}</td>
             <td>
                 {% if s.contest_id %}
                     {% set link = get_contest_link(s) %}

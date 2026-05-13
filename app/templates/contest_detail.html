@@ -184,7 +184,7 @@ window.addEventListener("DOMContentLoaded", () => {
             {% for row in rankings %}
             <tr>
                 <td>{{ row.rank }}</td>
-                <td>{{ row.user.username if row.user else "-" }}</td>
+                <td>{{ display_username(row.user) }}</td>
                 <td>{{ row.solved_count }}</td>
                 <td>{{ row.wrong_count }}</td>
                 <td>{{ row.runtime_ms }} ms</td>
@@ -217,7 +217,7 @@ window.addEventListener("DOMContentLoaded", () => {
     <h4>질문 목록</h4>
     {% for q in questions %}
     <div class="question-card">
-        <p><b>#{{ q.id }}</b> {{ q.user.username }} / {% if q.problem %}{{ q.problem.title }}{% else %}대회 전체{% endif %} / {{ q.created_at }} / {{ "공개" if q.is_public else "비공개" }}</p>
+        <p><b>#{{ q.id }}</b> {{ display_username(q.user) }} / {% if q.problem %}{{ q.problem.title }}{% else %}대회 전체{% endif %} / {{ q.created_at }} / {{ "공개" if q.is_public else "비공개" }}</p>
         {{ q.content|rich_text }}
         {% if q.answer %}<p><b>답변</b></p>{{ q.answer|rich_text }}{% else %}<p class="hint">아직 답변 없음</p>{% endif %}
         {% if can_manage_contest %}
