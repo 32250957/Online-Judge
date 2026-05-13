@@ -39,6 +39,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
       OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_C_IMAGE: oj-gcc:13
+      OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
     ports:
       - "80:8000"
@@ -48,23 +50,76 @@ services:
       - ./judge_work:/tmp/oj_judge_work
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
+  judge-images:
+    build: .
+    container_name: oj-judge-images
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/app
+    command: sh -c "docker --version && docker pull python:3.11-slim && docker build -f Dockerfile.gcc -t oj-gcc:13 /app && docker pull eclipse-temurin:17"
+
   worker:
     build: .
     restart: unless-stopped
     depends_on:
-      init:
+      judge-images:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
       OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_C_IMAGE: oj-gcc:13
+      OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
-      OJ_WORKER_NAME: ${OJ_WORKER_NAME:-docker-worker}
+      OJ_WORKER_NAME: worker-1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./problems:/app/problems
       - ./uploads:/app/uploads
       - ./judge_work:/tmp/oj_judge_work
-    command: sh -c "docker --version && docker pull python:3.11-slim && docker pull gcc:13 && docker pull eclipse-temurin:17 && python worker.py"
+    command: python worker.py
+
+  worker-2:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      judge-images:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_C_IMAGE: oj-gcc:13
+      OJ_CPP_IMAGE: oj-gcc:13
+      OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
+      OJ_WORKER_NAME: worker-2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./problems:/app/problems
+      - ./uploads:/app/uploads
+      - ./judge_work:/tmp/oj_judge_work
+    command: python worker.py
+
+  worker-3:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      judge-images:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_C_IMAGE: oj-gcc:13
+      OJ_CPP_IMAGE: oj-gcc:13
+      OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
+      OJ_WORKER_NAME: worker-3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./problems:/app/problems
+      - ./uploads:/app/uploads
+      - ./judge_work:/tmp/oj_judge_work
+    command: python worker.py
 
 volumes:
   postgres_data:

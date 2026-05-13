@@ -1,0 +1,7 @@
+# Judge image for C/C++ submissions.
+# Adds GNU time so memory_kb can be measured even for very short programs.
+FROM gcc:13
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends time coreutils procps \
+    && rm -rf /var/lib/apt/lists/*

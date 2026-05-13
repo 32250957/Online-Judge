@@ -142,8 +142,10 @@
                 <option value="admin">그룹 관리자로 변경</option>
             </select>
             <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-role" onclick="return confirm('선택한 회원의 역할을 변경할까요?');">선택 역할 변경</button>
+            {% if can_school_group_member_admin %}
             <input type="text" name="new_password" form="memberBulkForm" value="changeme1234" placeholder="초기화 비밀번호">
             <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
+            {% endif %}
             <button type="submit" class="danger-button" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-delete" onclick="return confirm('선택한 회원을 그룹에서 제거할까요?');">선택 회원 제거</button>
         </div>
         {% endif %}
@@ -151,14 +153,15 @@
 
     {% if can_manage %}
     <details class="sub-box">
-        <summary>초대 / CSV 일괄 추가</summary>
+        <summary>초대{% if can_school_group_member_admin %} / CSV 일괄 추가{% endif %}</summary>
         <form action="/groups/{{ group.id }}/invite" method="post">
             <label>초대할 사용자 아이디</label>
             <input type="text" name="username" required>
             <button type="submit">초대 메세지 보내기</button>
         </form>
+        {% if can_school_group_member_admin %}
         <hr>
-        <p class="hint">첫 줄은 username 형식입니다. 이미 존재하는 회원만 그룹에 추가합니다.</p>
+        <p class="hint">승인된 학교 분반 그룹에서는 기존 회원을 CSV로 일괄 추가할 수 있습니다. 첫 줄은 username 형식입니다.</p>
         <form action="/groups/{{ group.id }}/members/bulk-add" method="post" enctype="multipart/form-data">
             <input type="file" name="csv_file" accept=".csv,text/csv">
             <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
@@ -167,9 +170,8 @@ student01
 student02"></textarea>
             <button type="submit">기존 회원 일괄 추가</button>
         </form>
-        {% if group.is_school_group %}
         <hr>
-        <p class="hint">학교 분반 그룹에서는 그룹 소유자/관리자/OJ 관리자가 계정을 생성하면서 그룹에 일괄 추가할 수 있습니다.</p>
+        <p class="hint">승인된 학교 분반 그룹에서는 그룹 소유자/관리자/OJ 관리자가 계정을 생성하면서 그룹에 일괄 추가할 수 있습니다.</p>
         <form action="/groups/{{ group.id }}/members/bulk-create" method="post" enctype="multipart/form-data">
             <input type="file" name="csv_file" accept=".csv,text/csv">
             <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
@@ -177,6 +179,8 @@ student02"></textarea>
 student01,1234,홍길동,10101"></textarea>
             <button type="submit">계정 생성 후 그룹 추가</button>
         </form>
+        {% else %}
+        <p class="hint">CSV 일괄 추가와 비밀번호 초기화는 승인된 학교 분반 그룹에서만 사용할 수 있습니다.</p>
         {% endif %}
     </details>
 

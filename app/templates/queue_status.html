@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>채점 큐 상태</h2>
+<section class="box">
+    <p class="hint">현재 채점 대기/진행 상황을 확인할 수 있습니다. Java처럼 오래 걸리는 제출이 있어도 여러 채점 워커가 동시에 처리하도록 구성되어 있습니다.</p>
+    <div class="stats-grid">
+        <div class="stat-card"><b id="active-workers">{{ active_workers }}</b><span>활성 채점 워커</span></div>
+        <div class="stat-card"><b id="queued-count">{{ queued_count }}</b><span>전체 대기 작업</span></div>
+        <div class="stat-card"><b id="running-count">{{ running_count }}</b><span>현재 채점 중</span></div>
+        <div class="stat-card"><b>{{ counts.get('FAILED', 0) }}</b><span>실패 작업</span></div>
+    </div>
+</section>
+
+<section class="box">
+    <h3>내 대기/진행 중 채점</h3>
+    <table id="my-queue-table">
+        <thead>
+            <tr><th>Job</th><th>제출</th><th>문제</th><th>상태</th><th>대기 순번</th><th>워커</th><th>생성</th><th>시작</th></tr>
+        </thead>
+        <tbody>
+        {% for job in user_jobs %}
+            <tr>
+                <td>{{ job.id }}</td>
+                <td><a href="/submissions/{{ job.submission_id }}">{{ job.submission_id }}</a></td>
+                <td>{% if job.submission and job.submission.problem %}{{ job.submission.problem.id }}. {{ job.submission.problem.title }}{% elif job.submission %}{{ job.submission.problem_id }}{% else %}-{% endif %}</td>
+                <td><span class="badge {% if job.status == 'FAILED' %}danger-badge{% elif job.status == 'RUNNING' %}badge-warn{% endif %}">{{ job.status }}</span></td>
+                <td>{% if positions.get(job.id) %}{{ positions.get(job.id) }}번째{% else %}-{% endif %}</td>
+                <td>{{ job.worker_name if job.status == 'RUNNING' else '-' }}</td>
+                <td>{{ job.created_at }}</td>
+                <td>{{ job.started_at or '-' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="8">현재 대기 중이거나 진행 중인 내 채점 작업이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
+    <h3>최근 완료된 내 채점</h3>
+    <table>
+        <thead><tr><th>Job</th><th>제출</th><th>상태</th><th>생성</th><th>종료</th></tr></thead>
+        <tbody>
+        {% for job in recent_user_jobs %}
+            <tr>
+                <td>{{ job.id }}</td>
+                <td><a href="/submissions/{{ job.submission_id }}">{{ job.submission_id }}</a></td>
+                <td>{{ job.status }}</td>
+                <td>{{ job.created_at }}</td>
+                <td>{{ job.finished_at or '-' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5">최근 완료된 채점 작업이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<script>
+async function refreshQueueStatus() {
+    try {
+        const response = await fetch('/api/queue/status');
+        if (!response.ok) return;
+        const data = await response.json();
+        document.getElementById('active-workers').textContent = data.active_workers;
+        document.getElementById('queued-count').textContent = data.queued_count;
+        document.getElementById('running-count').textContent = data.running_count;
+        const tbody = document.querySelector('#my-queue-table tbody');
+        if (!tbody) return;
+        if (!data.jobs || data.jobs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8">현재 대기 중이거나 진행 중인 내 채점 작업이 없습니다.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        for (const job of data.jobs) {
+            const tr = document.createElement('tr');
+            const position = job.position ? `${job.position}번째` : '-';
+            const worker = job.status === 'RUNNING' && job.worker_name ? job.worker_name : '-';
+            tr.innerHTML = `<td>${job.id}</td><td><a href="/submissions/${job.submission_id}">${job.submission_id}</a></td><td>-</td><td><span class="badge ${job.status === 'FAILED' ? 'danger-badge' : (job.status === 'RUNNING' ? 'badge-warn' : '')}">${job.status}</span></td><td>${position}</td><td>${worker}</td><td>${job.created_at}</td><td>${job.started_at || '-'}</td>`;
+            tbody.appendChild(tr);
+        }
+    } catch (e) {}
+}
+setInterval(refreshQueueStatus, 2000);
+refreshQueueStatus();
+</script>
+{% endblock %}

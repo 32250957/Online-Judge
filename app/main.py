@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, or_, text, case
+from sqlalchemy import func, or_, and_, text, case
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import SessionLocal, engine
@@ -959,6 +959,21 @@ def user_can_manage_group(user: Optional[User], group: Group) -> bool:
     return is_group_manager(user, group)
 
 
+def is_approved_school_group(group: Optional[Group]) -> bool:
+    return bool(group and group.is_school_group and group.school_group_request_status == "approved")
+
+
+def can_manage_school_group_members(user: Optional[User], group: Optional[Group], db: Optional[Session] = None) -> bool:
+    if user is None or group is None:
+        return False
+    return bool(is_approved_school_group(group) and is_group_manager(user, group, db))
+
+
+def require_school_group_member_admin(user: User, group: Group, db: Optional[Session] = None) -> None:
+    if not can_manage_school_group_members(user, group, db):
+        raise HTTPException(status_code=403, detail="회원 비밀번호 초기화와 CSV 일괄 추가는 승인된 학교 분반 그룹에서만 사용할 수 있습니다.")
+
+
 def can_create_group_contest_problem(user: Optional[User], group: Optional[Group], db: Optional[Session] = None) -> bool:
     if user is None or group is None:
         return False
@@ -1730,6 +1745,98 @@ def render_submissions_page(request: Request, db: Session, only_mine: bool):
         "total_count": total_count,
     })
 
+
+
+
+def _active_worker_count(db: Session) -> int:
+    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(50).all()
+    return len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
+
+
+def _job_queue_position(db: Session, job: JudgeJob) -> int | None:
+    if job.status != "QUEUED":
+        return None
+    ahead = (
+        db.query(JudgeJob)
+        .filter(JudgeJob.status == "QUEUED")
+        .filter(or_(JudgeJob.priority > job.priority, and_(JudgeJob.priority == job.priority, JudgeJob.id < job.id)))
+        .count()
+    )
+    return ahead + 1
+
+
+@app.get("/queue", response_class=HTMLResponse)
+def user_judge_queue_page(request: Request, db: Session = Depends(get_db)):
+    user = require_login(request, db)
+    statuses = ["QUEUED", "RUNNING", "DONE", "FAILED", "CANCELED"]
+    counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in statuses}
+    active_workers = _active_worker_count(db)
+    user_jobs = (
+        db.query(JudgeJob)
+        .join(Submission, JudgeJob.submission_id == Submission.id)
+        .options(joinedload(JudgeJob.submission).joinedload(Submission.problem))
+        .filter(Submission.user_id == user.id)
+        .filter(JudgeJob.status.in_(["QUEUED", "RUNNING", "FAILED"]))
+        .order_by(JudgeJob.id.desc())
+        .limit(50)
+        .all()
+    )
+    recent_user_jobs = (
+        db.query(JudgeJob)
+        .join(Submission, JudgeJob.submission_id == Submission.id)
+        .options(joinedload(JudgeJob.submission).joinedload(Submission.problem))
+        .filter(Submission.user_id == user.id)
+        .filter(JudgeJob.status.in_(["DONE", "CANCELED"]))
+        .order_by(JudgeJob.id.desc())
+        .limit(20)
+        .all()
+    )
+    positions = {job.id: _job_queue_position(db, job) for job in user_jobs}
+    return templates.TemplateResponse("queue_status.html", {
+        "request": request,
+        "user": user,
+        "counts": counts,
+        "active_workers": active_workers,
+        "queued_count": counts.get("QUEUED", 0),
+        "running_count": counts.get("RUNNING", 0),
+        "user_jobs": user_jobs,
+        "recent_user_jobs": recent_user_jobs,
+        "positions": positions,
+    })
+
+
+@app.get("/api/queue/status")
+def api_user_judge_queue_status(request: Request, db: Session = Depends(get_db)):
+    user = require_login(request, db)
+    counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in ["QUEUED", "RUNNING", "FAILED"]}
+    jobs = (
+        db.query(JudgeJob)
+        .join(Submission, JudgeJob.submission_id == Submission.id)
+        .filter(Submission.user_id == user.id)
+        .filter(JudgeJob.status.in_(["QUEUED", "RUNNING", "FAILED"]))
+        .order_by(JudgeJob.id.desc())
+        .limit(20)
+        .all()
+    )
+    return {
+        "active_workers": _active_worker_count(db),
+        "queued_count": counts.get("QUEUED", 0),
+        "running_count": counts.get("RUNNING", 0),
+        "failed_count": counts.get("FAILED", 0),
+        "jobs": [
+            {
+                "id": job.id,
+                "submission_id": job.submission_id,
+                "status": job.status,
+                "position": _job_queue_position(db, job),
+                "worker_name": job.worker_name if job.status == "RUNNING" else "",
+                "created_at": str(job.created_at),
+                "started_at": str(job.started_at) if job.started_at else "",
+            }
+            for job in jobs
+        ],
+    }
 
 @app.get("/submissions", response_class=HTMLResponse)
 def submissions(request: Request, db: Session = Depends(get_db)):
@@ -3314,6 +3421,7 @@ def group_detail(group_id: int, request: Request, board_type: str = Query("all")
     selectable_contests = db.query(Contest).order_by(Contest.id.desc()).all()
     can_manage_members = is_group_owner_or_site_admin(user, group)
     default_start_dt, default_end_dt = default_event_times()
+    can_school_group_member_admin = can_manage_school_group_members(user, group, db)
     return templates.TemplateResponse("group_detail.html", {
         "request": request,
         "user": user,
@@ -3321,6 +3429,7 @@ def group_detail(group_id: int, request: Request, board_type: str = Query("all")
         "membership": membership,
         "can_manage": can_manage,
         "can_manage_members": can_manage_members,
+        "can_school_group_member_admin": can_school_group_member_admin,
         "practice_is_closed": group_practice_is_closed,
         "practice_is_open": group_practice_is_open,
         "pending_request": pending_request,
@@ -3648,6 +3757,7 @@ def bulk_add_existing_group_members(group_id: int, request: Request, csv_text: s
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
+    require_school_group_member_admin(user, group, db)
     added_members = 0
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
@@ -3672,8 +3782,7 @@ def bulk_create_group_members(group_id: int, request: Request, csv_text: str = F
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    if not group.is_school_group:
-        raise HTTPException(status_code=403, detail="그룹 내 계정 일괄 생성은 학교 분반 그룹에서만 사용할 수 있습니다.")
+    require_school_group_member_admin(user, group, db)
     created_users = 0
     added_members = 0
     skipped = 0
@@ -4595,6 +4704,7 @@ def bulk_reset_group_member_passwords(group_id: int, request: Request, member_id
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
+    require_school_group_member_admin(user, group, db)
     if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
     member_user_ids = {member.user_id for member in db.query(GroupMember).filter(GroupMember.group_id == group.id).all()}

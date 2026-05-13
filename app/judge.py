@@ -10,8 +10,8 @@ from pathlib import Path
 DOCKER_CPUS = os.getenv("OJ_DOCKER_CPUS", "1")
 DOCKER_PIDS_LIMIT = os.getenv("OJ_DOCKER_PIDS_LIMIT", "64")
 PYTHON_IMAGE = os.getenv("OJ_PYTHON_IMAGE", "python:3.11-slim")
-C_IMAGE = os.getenv("OJ_C_IMAGE", "gcc:13")
-CPP_IMAGE = os.getenv("OJ_CPP_IMAGE", "gcc:13")
+C_IMAGE = os.getenv("OJ_C_IMAGE", "oj-gcc:13")
+CPP_IMAGE = os.getenv("OJ_CPP_IMAGE", "oj-gcc:13")
 JAVA_IMAGE = os.getenv("OJ_JAVA_IMAGE", "eclipse-temurin:17")
 
 SUPPORTED_LANGUAGES = {
@@ -76,7 +76,8 @@ memory_kb=0
 timed_out=false
 
 # Prefer GNU time because it reads ru_maxrss and can catch even very short C/C++ programs.
-# If it is unavailable in the language image, fall back to lightweight /proc polling.
+# Official compiler images do not always include GNU time, so docker-compose builds oj-gcc:13 with the time package installed.
+# If GNU time is unavailable, fall back to lightweight /proc polling.
 if command -v /usr/bin/time >/dev/null 2>&1; then
   set +e
   if [ -n "${OJ_INPUT_FILE:-}" ] && [ -r "$OJ_INPUT_FILE" ]; then
