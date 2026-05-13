@@ -1,0 +1,10 @@
+{
+  "id": 1004,
+  "title": "$I \\; Love \\; Dankook$",
+  "description": "당신은 단국을 너무나도 사랑한 나머지 자연수를 들으면 반드시 그만큼 $I \\; Love \\; Dankook$을 외치는 병에 걸렸다.\r\n들은 숫자만큼 $I \\; Love \\; Dankook$을 출력하자.",
+  "input_description": "자연수 $N$이 주어진다. $(1 \\le N \\le 32767)$",
+  "output_description": "한 줄에 하나씩 $I \\; Love \\; Dankook$을 $N$번 출력한다.",
+  "time_limit": 2,
+  "memory_limit": 128,
+  "allowed_languages": "python,c,cpp,java"
+}
