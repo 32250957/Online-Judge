@@ -1,0 +1,10 @@
+{
+  "id": 1005,
+  "title": "별 찍기 - 1",
+  "description": "예제를 보고 유추하여 적절히 별을 찍어보자.",
+  "input_description": "첫 번째 줄에 자연수 $N$이 주어진다. $(1 \\le N \\le 50)$",
+  "output_description": "별을 적절히 찍어 출력한다.",
+  "time_limit": 2,
+  "memory_limit": 256,
+  "allowed_languages": "python,c,cpp,java"
+}
