@@ -2,6 +2,32 @@
 {% block content %}
 <h2>{% if problem %}문제 수정{% else %}일반 문제 추가{% endif %}</h2>
 {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
+{% if problem %}
+{% set tc_status = testcase_status_for_problem(problem.id) %}
+<section class="box problem-status-panel">
+    <h3>문제 상태 점검</h3>
+    <p>
+    {% for badge in problem_status_badges(problem) %}
+        <span class="badge badge-{{ badge.kind }}">{{ badge.label }}</span>
+    {% endfor %}
+    </p>
+    <table class="compact-table">
+        <tbody>
+            <tr><th>테스트케이스 쌍</th><td>{{ tc_status.pair_count }}개</td></tr>
+            <tr><th>입력 파일</th><td>{{ tc_status.input_count }}개</td></tr>
+            <tr><th>출력 파일</th><td>{{ tc_status.output_count }}개</td></tr>
+            <tr><th>상태</th><td>{% if tc_status.ok %}<span class="success-text">정상</span>{% else %}<span class="danger-text">점검 필요</span>{% endif %}</td></tr>
+        </tbody>
+    </table>
+    {% if tc_status.issues %}
+    <ul class="danger-text">{% for issue in tc_status.issues %}<li>{{ issue }}</li>{% endfor %}</ul>
+    {% else %}
+    <p class="hint">입력/출력 테스트케이스 쌍이 정상적으로 구성되어 있습니다.</p>
+    {% endif %}
+</section>
+{% endif %}
+
 <form action="{{ action }}" method="post" class="box">
     {% if not problem %}
     <label>문제 번호</label><input type="number" name="problem_id" required>
@@ -9,8 +35,24 @@
     <p><b>문제 번호:</b> {{ problem.id }} {% if problem.is_contest_only %}(대회 전용){% endif %}</p>
     {% endif %}
     <label>제목</label><input type="text" name="title" value="{{ problem.title if problem else '' }}" required>
-    <label>난이도</label><input type="text" name="difficulty" value="{{ problem.difficulty if problem else '미지정' }}" placeholder="예: Bronze 3, 쉬움, 중간">
-    <label>태그</label><input type="text" name="tags" value="{{ problem.tags if problem else '' }}" placeholder="쉼표로 구분: 구현, DP, 그리디">
+    <label>티어</label>
+    <select name="tier">
+        {% for t in range(0, 31) %}
+        <option value="{{ t }}" {% if (problem and problem.tier == t) or (not problem and t == 0) %}selected{% endif %}>{{ tier_name(t) }}</option>
+        {% endfor %}
+    </select>
+    <label>채점 우선도</label>
+    <input type="number" name="judge_priority" value="{{ problem.judge_priority if problem else 0 }}" min="-100" max="100">
+    <p class="hint">값이 클수록 채점 큐에서 먼저 처리됩니다. 일반 문제는 0, 수업/시험 핵심 문제는 10~30 정도를 권장합니다.</p>
+    <label>알고리즘 태그</label>
+    <div class="tag-check-grid">
+        {% for tag in algorithm_tags %}
+        <label class="tag-check-item"><input type="checkbox" name="algorithm_tags" value="{{ tag.key }}" {% if tag.key in selected_tag_keys %}checked{% endif %}> {{ tag.name }}</label>
+        {% else %}
+        <p class="hint">등록된 알고리즘 태그가 없습니다. 관리자 탭에서 먼저 태그를 등록해주세요.</p>
+        {% endfor %}
+    </div>
+    <p class="hint">문제 태그는 관리자 탭에 사전 등록된 항목 중에서만 선택할 수 있습니다.</p>
     <label>출처</label><input type="text" name="source" value="{{ problem.source if problem else '' }}" placeholder="예: 2026 알고리즘 수업 1주차">
     <div class="grid two compact-fields">
         <div><label>문제를 만든 사람</label><input type="text" name="problem_author" value="{{ problem.problem_author if problem else '' }}" placeholder="예: 출제자 이름"></div>
@@ -23,6 +65,16 @@
     <label>문제 설명</label><textarea name="description" required>{{ problem.description if problem else '' }}</textarea>
     <label>입력 설명</label><textarea name="input_description" required>{{ problem.input_description if problem else '' }}</textarea>
     <label>출력 설명</label><textarea name="output_description" required>{{ problem.output_description if problem else '' }}</textarea>
+
+    <details class="sub-box question-card" open>
+        <summary>지문 미리보기</summary>
+        <p class="hint">문제 설명/입력 설명/출력 설명의 줄바꿈과 MathJax 렌더링을 저장 전에 확인합니다.</p>
+        <div class="preview-grid">
+            <div><h4>문제 설명</h4><div id="description-preview" class="rich-text math-content preview-box"></div></div>
+            <div><h4>입력 설명</h4><div id="input-description-preview" class="rich-text math-content preview-box"></div></div>
+            <div><h4>출력 설명</h4><div id="output-description-preview" class="rich-text math-content preview-box"></div></div>
+        </div>
+    </details>
 
     <details class="sub-box question-card">
         <summary>노트 작성</summary>
@@ -47,8 +99,20 @@
     <label>예제 입력</label><textarea name="sample_inputs">{{ sample_inputs if sample_inputs is defined else '' }}</textarea>
     <label>예제 출력</label><textarea name="sample_outputs">{{ sample_outputs if sample_outputs is defined else '' }}</textarea>
 
-    <label>시간 제한</label><input type="number" name="time_limit" value="{{ problem.time_limit if problem else 2 }}" required>
-    <label>메모리 제한(MB)</label><input type="number" name="memory_limit" value="{{ problem.memory_limit if problem else 256 }}" required>
+    <div class="grid two compact-fields">
+        <div><label>기본 시간 제한(초)</label><input type="number" name="time_limit" value="{{ problem.time_limit if problem else 2 }}" min="1" max="60" required></div>
+        <div><label>메모리 제한(MB)</label><input type="number" name="memory_limit" value="{{ problem.memory_limit if problem else 256 }}" min="16" max="4096" required></div>
+    </div>
+    <details class="sub-box question-card">
+        <summary>언어별 시간 제한</summary>
+        <p class="hint">비워두면 자동 보정됩니다. C/C++은 기본 시간, Java는 기본 시간 × 2 + 1, Python은 기본 시간 × 3 + 2로 채점합니다.</p>
+        <div class="grid two compact-fields">
+            <div><label>Python 3 제한(초)</label><input type="number" name="python_time_limit" value="{{ problem.python_time_limit if problem and problem.python_time_limit is not none else '' }}" min="1" max="60" placeholder="자동"></div>
+            <div><label>C 제한(초)</label><input type="number" name="c_time_limit" value="{{ problem.c_time_limit if problem and problem.c_time_limit is not none else '' }}" min="1" max="60" placeholder="자동"></div>
+            <div><label>C++17 제한(초)</label><input type="number" name="cpp_time_limit" value="{{ problem.cpp_time_limit if problem and problem.cpp_time_limit is not none else '' }}" min="1" max="60" placeholder="자동"></div>
+            <div><label>Java 17 제한(초)</label><input type="number" name="java_time_limit" value="{{ problem.java_time_limit if problem and problem.java_time_limit is not none else '' }}" min="1" max="60" placeholder="자동"></div>
+        </div>
+    </details>
     {% if not problem or can_manage_public_settings %}
     <label><input type="checkbox" name="is_public" {% if not problem or problem.is_public %}checked{% endif %}> 일반 문제 목록에 공개</label>
     {% endif %}
@@ -83,7 +147,7 @@
             <textarea name="output_text" class="short-code-textarea">{{ tc.output }}</textarea>
             <button type="submit">수정 저장</button>
         </form>
-        <form action="/admin/problems/{{ problem.id }}/testcases/{{ tc.index }}/delete" method="post" onsubmit="return confirm('이 테스트케이스를 삭제할까요?');">
+        <form action="/admin/problems/{{ problem.id }}/testcases/{{ tc.index }}/delete" method="post" onsubmit="return confirmDanger(this, '테스트케이스를 삭제하겠습니다', '이 테스트케이스를 삭제합니다.');">
             <button type="submit" class="danger-button">삭제</button>
         </form>
     </details>
@@ -102,9 +166,17 @@
 <div class="box danger-box">
     <h3>기존 제출 재채점</h3>
     <p class="hint">문제 설명, 시간 제한, 메모리 제한, 테스트케이스를 수정한 뒤 이 문제의 기존 제출 결과를 다시 계산할 수 있습니다.</p>
-    <form action="/admin/problems/{{ problem.id }}/rejudge" method="post" onsubmit="return confirm('이 문제의 모든 기존 제출을 다시 채점할까요? 제출 수가 많으면 시간이 걸릴 수 있습니다.');">
+    <form action="/admin/problems/{{ problem.id }}/rejudge" method="post" onsubmit="return confirmDanger(this, '재채점하겠습니다', '선택한 언어의 기존 제출을 재채점 큐에 넣습니다. 선택하지 않으면 모든 언어를 재채점합니다.');">
+        <fieldset class="compact-fieldset">
+            <legend>재채점 언어 선택</legend>
+            <p class="hint">아무것도 선택하지 않으면 이 문제의 모든 언어 제출을 재채점합니다.</p>
+            {% for lang in language_options_for_problem(problem) %}
+                <label class="inline-check"><input type="checkbox" name="rejudge_languages" value="{{ lang.value }}"> {{ lang.label }}</label>
+            {% endfor %}
+        </fieldset>
         <button type="submit">이 문제 기존 제출 재채점</button>
     </form>
 </div>
 {% endif %}
+<script src="/static/problem-preview.js"></script>
 {% endblock %}

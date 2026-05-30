@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>프로필 배경 / 배지 관리</h2>
+<p><a class="button" href="/admin">관리자 페이지</a></p>
+{% if message %}<div class="success-box">{{ message }}</div>{% endif %}
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
+<section class="box">
+    <h3>새 프로필 보상 추가</h3>
+    <form method="post" action="/admin/profile-assets" class="problem-form" enctype="multipart/form-data">
+        <label>종류</label>
+        <select name="asset_type">
+            <option value="badge">프로필 배지</option>
+            <option value="background">프로필 배경</option>
+        </select>
+        <label>이름</label>
+        <input name="title" required placeholder="예: 첫 AC 배지">
+        <label>설명</label>
+        <input name="description" placeholder="보상 설명">
+        <label>이미지 파일</label>
+        <input type="file" name="image_file" accept="image/*">
+        <label>아이콘 텍스트</label>
+        <input name="icon_text" placeholder="★, AC, +5 등">
+        <label>획득 조건</label>
+        <select name="condition_type">
+            <option value="default">기본 지급</option>
+            <option value="single">특정 문제 해결</option>
+            <option value="all">설정한 모든 문제 해결</option>
+            <option value="any">다수 문제 중 하나 이상 해결</option>
+            <option value="period_solve">특정 기간에 N문제 이상 해결</option>
+            <option value="streak">스트릭 연속 N일 이상</option>
+            <option value="tag_rating">태그 레이팅 N개가 M 이상</option>
+        </select>
+        <label>조건 문제 번호</label>
+        <textarea name="condition_problem_ids" rows="3" placeholder="1000, 1001, 1002"></textarea>
+        <label>조건 값</label>
+        <input name="condition_value" placeholder="기간: 7,5 / 스트릭: 30 / 태그: 3,800">
+        <label class="checkbox"><input type="checkbox" name="is_default"> 계정 생성 시 자동 지급</label>
+        <label class="checkbox"><input type="checkbox" name="is_active" checked> 활성화</label>
+        <button type="submit">추가</button>
+    </form>
+</section>
+
+<section class="box">
+    <h3>등록된 프로필 보상</h3>
+    <table>
+        <thead><tr><th>ID</th><th>종류</th><th>이름</th><th>조건</th><th>기본</th><th>활성</th><th>수정</th></tr></thead>
+        <tbody>
+        {% for asset in assets %}
+        <tr>
+            <td>{{ asset.id }}</td>
+            <td>{{ '배경' if asset.asset_type == 'background' else '배지' }}</td>
+            <td>{{ asset.title }}</td>
+            <td>{{ asset.condition_type }} · {{ asset.condition_problem_ids }} · {{ asset.condition_value }}</td>
+            <td>{{ 'YES' if asset.is_default else 'NO' }}</td>
+            <td>{{ 'ON' if asset.is_active else 'OFF' }}</td>
+            <td>
+                <details>
+                    <summary>수정</summary>
+                    <form method="post" action="/admin/profile-assets/{{ asset.id }}/edit" class="small-form" enctype="multipart/form-data">
+                        <select name="asset_type">
+                            <option value="badge" {% if asset.asset_type == 'badge' %}selected{% endif %}>프로필 배지</option>
+                            <option value="background" {% if asset.asset_type == 'background' %}selected{% endif %}>프로필 배경</option>
+                        </select>
+                        <input name="title" value="{{ asset.title }}" required>
+                        <input name="description" value="{{ asset.description }}">
+                        <label>이미지 파일 변경</label><input type="file" name="image_file" accept="image/*"><small>현재 파일: {{ asset.image_url or '없음' }}</small>
+                        <input name="icon_text" value="{{ asset.icon_text }}">
+                        <select name="condition_type">
+                            <option value="default" {% if asset.condition_type == 'default' %}selected{% endif %}>기본 지급</option>
+                            <option value="single" {% if asset.condition_type == 'single' %}selected{% endif %}>특정 문제</option>
+                            <option value="all" {% if asset.condition_type == 'all' %}selected{% endif %}>모두 해결</option>
+                            <option value="any" {% if asset.condition_type == 'any' %}selected{% endif %}>하나 이상</option>
+                            <option value="period_solve" {% if asset.condition_type == 'period_solve' %}selected{% endif %}>특정 기간 N문제</option>
+                            <option value="streak" {% if asset.condition_type == 'streak' %}selected{% endif %}>스트릭 N일</option>
+                            <option value="tag_rating" {% if asset.condition_type == 'tag_rating' %}selected{% endif %}>태그 레이팅</option>
+                        </select>
+                        <textarea name="condition_problem_ids" rows="2">{{ asset.condition_problem_ids }}</textarea>
+                        <input name="condition_value" value="{{ asset.condition_value }}" placeholder="7,5 / 30 / 3,800">
+                        <label class="checkbox"><input type="checkbox" name="is_default" {% if asset.is_default %}checked{% endif %}> 기본 지급</label>
+                        <label class="checkbox"><input type="checkbox" name="is_active" {% if asset.is_active %}checked{% endif %}> 활성화</label>
+                        <button type="submit">저장</button>
+                    </form>
+                    <form method="post" action="/admin/profile-assets/{{ asset.id }}/delete" class="inline-actions" onsubmit="return confirm('삭제할까요?');">
+                        <button class="danger" type="submit">삭제</button>
+                    </form>
+                </details>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7">등록된 보상이 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

@@ -1,6 +1,9 @@
 from pathlib import Path
+import os
+import secrets
 import json
 import re
+import html
 import csv
 import io
 import shutil
@@ -8,7 +11,8 @@ import subprocess
 import zipfile
 import uuid
 import time
-from datetime import datetime, timedelta
+from urllib.parse import urlencode
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 from markupsafe import Markup, escape
@@ -19,14 +23,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, or_, and_, text, case
+from sqlalchemy import func, or_, and_, text, case, DateTime
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import SessionLocal, engine
+from app.database import SessionLocal, engine, Base
 from app.schema import ensure_postgresql_schema
-from app.models import User, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment
+from app.models import User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment, ProfileAsset
 from app.security import hash_password, verify_password
-from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES
+from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES, effective_time_limit_for_language
 from app.services.domain import (
     create_contest_with_problems,
     create_group_contest as service_create_group_contest,
@@ -40,9 +44,75 @@ from fastapi.templating import Jinja2Templates
 from fastapi.exception_handlers import http_exception_handler
 
 SUBMIT_BAN_SECONDS_DEFAULT = 10
+SESSION_MAX_AGE_SECONDS = int(os.getenv("SESSION_MAX_AGE_SECONDS", str(60 * 60 * 24 * 30)))
+SESSION_NORMAL_SECONDS = int(os.getenv("SESSION_NORMAL_SECONDS", str(60 * 60 * 12)))
+SESSION_REMEMBER_SECONDS = int(os.getenv("SESSION_REMEMBER_SECONDS", str(60 * 60 * 24 * 30)))
+CSRF_SESSION_KEY = "csrf_token"
+CSRF_FORM_FIELD = "csrf_token"
+UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ACCOUNT_ALLOWED_PATTERN = re.compile(r"^[A-Za-z0-9`~!@#$%^&*|\\\'\";:₩\\?]+$")
 ACCOUNT_ALLOWED_HINT = "영어 대소문자, 숫자, 특수문자 ` ~ ! @ # $ % ^ & * | ' \" ; : ₩ \\ ? 만 사용할 수 있습니다."
 DELETED_USERNAME_PREFIX = "Deleted_User_"
+BACKUP_DIR = Path(os.getenv("OJ_BACKUP_DIR", "backups"))
+BACKUP_MODEL_LIST = [
+    User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Contest, ContestProblem,
+    ContestEditorial, Submission, ContestQuestion, Group, GroupMember, GroupJoinRequest,
+    GroupProblemSet, GroupProblemSetProblem, GroupPractice, GroupPracticeProblem,
+    GroupContest, JudgeJob, JudgeLog, AuditLog, BoardPost, BoardComment, ProfileAsset, Message,
+]
+BACKUP_RESTORE_CONFIRM_TEXT = "복구합니다"
+ACTIVE_VISITORS: dict[str, float] = {}
+ACTIVE_VISITOR_TTL_SECONDS = int(os.getenv("ACTIVE_VISITOR_TTL_SECONDS", "60"))
+ACTIVE_VISITOR_SESSION_KEY = "active_visitor_id"
+
+
+def ensure_active_visitor_id(request: Request) -> str:
+    """동일 브라우저/세션의 비로그인 방문자를 하나로 묶기 위한 키를 보장한다."""
+    visitor_id = request.session.get(ACTIVE_VISITOR_SESSION_KEY)
+    if not visitor_id:
+        visitor_id = secrets.token_urlsafe(16)
+        request.session[ACTIVE_VISITOR_SESSION_KEY] = visitor_id
+    return str(visitor_id)
+
+
+def active_guest_key(visitor_id: str) -> str:
+    return f"guest:{visitor_id}"
+
+
+def active_user_key(user_id: int | str) -> str:
+    return f"user:{user_id}"
+
+
+def active_visitor_key(request: Request) -> str:
+    session_user_id = request.session.get("user_id")
+    visitor_id = ensure_active_visitor_id(request)
+    if session_user_id is not None:
+        # 로그인으로 전환된 같은 세션의 비로그인 기록은 즉시 제거한다.
+        ACTIVE_VISITORS.pop(active_guest_key(visitor_id), None)
+        return active_user_key(session_user_id)
+    return active_guest_key(visitor_id)
+
+
+def register_active_visitor(request: Request) -> int:
+    ACTIVE_VISITORS[active_visitor_key(request)] = time.time()
+    return count_active_visitors()
+
+
+def unregister_active_visitor(request: Request) -> None:
+    visitor_id = request.session.get(ACTIVE_VISITOR_SESSION_KEY)
+    if visitor_id:
+        ACTIVE_VISITORS.pop(active_guest_key(str(visitor_id)), None)
+    user_id = request.session.get("user_id")
+    if user_id is not None:
+        ACTIVE_VISITORS.pop(active_user_key(user_id), None)
+
+
+def count_active_visitors() -> int:
+    cutoff = time.time() - ACTIVE_VISITOR_TTL_SECONDS
+    stale_keys = [key for key, seen_at in ACTIVE_VISITORS.items() if seen_at < cutoff]
+    for key in stale_keys:
+        ACTIVE_VISITORS.pop(key, None)
+    return len(ACTIVE_VISITORS)
 
 
 def validate_username_value(username: str) -> str | None:
@@ -75,6 +145,14 @@ def display_username(user: Optional[User]) -> str:
     return user.username
 
 
+def csv_display_username(user: Optional[User], admin_detail: bool = True) -> str:
+    if user is None:
+        return ""
+    if getattr(user, "is_deleted", False):
+        return f"탈퇴한 사용자 ({user.username})" if admin_detail else "탈퇴한 사용자"
+    return user.username
+
+
 def active_user_query(db: Session):
     return db.query(User).filter(User.is_deleted == False)  # noqa: E712
 
@@ -82,6 +160,625 @@ def active_user_query(db: Session):
 def count_active_group_members(group: Group) -> int:
     return sum(1 for member in (group.members or []) if member.user and not member.user.is_deleted and not member.user.is_admin)
 
+
+SOLVED_AC_TIER_NAMES = {
+    0: "Unrated",
+    1: "Bronze V", 2: "Bronze IV", 3: "Bronze III", 4: "Bronze II", 5: "Bronze I",
+    6: "Silver V", 7: "Silver IV", 8: "Silver III", 9: "Silver II", 10: "Silver I",
+    11: "Gold V", 12: "Gold IV", 13: "Gold III", 14: "Gold II", 15: "Gold I",
+    16: "Platinum V", 17: "Platinum IV", 18: "Platinum III", 19: "Platinum II", 20: "Platinum I",
+    21: "Diamond V", 22: "Diamond IV", 23: "Diamond III", 24: "Diamond II", 25: "Diamond I",
+    26: "Ruby V", 27: "Ruby IV", 28: "Ruby III", 29: "Ruby II", 30: "Ruby I",
+    31: "Master",
+}
+
+SOLVED_AC_TIER_THRESHOLDS = [
+    (3000, 31),
+    (2950, 30), (2900, 29), (2850, 28), (2800, 27), (2700, 26),
+    (2600, 25), (2500, 24), (2400, 23), (2300, 22), (2200, 21),
+    (2100, 20), (2000, 19), (1900, 18), (1750, 17), (1600, 16),
+    (1400, 15), (1250, 14), (1100, 13), (950, 12), (800, 11),
+    (650, 10), (500, 9), (400, 8), (300, 7), (200, 6),
+    (150, 5), (120, 4), (90, 3), (60, 2), (30, 1),
+]
+
+
+def tier_name(tier: int | None) -> str:
+    try:
+        value = int(tier or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return SOLVED_AC_TIER_NAMES.get(value, "Unrated")
+
+
+def tier_group(tier: int | None) -> str:
+    try:
+        value = int(tier or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value >= 31:
+        return "master"
+    if value >= 26:
+        return "ruby"
+    if value >= 21:
+        return "diamond"
+    if value >= 16:
+        return "platinum"
+    if value >= 11:
+        return "gold"
+    if value >= 6:
+        return "silver"
+    if value >= 1:
+        return "bronze"
+    return "unrated"
+
+
+
+
+def tier_short(tier: int | None) -> str:
+    name = tier_name(tier)
+    if name == "Unrated":
+        return "UR"
+    roman_to_arabic = {"V": "5", "IV": "4", "III": "3", "II": "2", "I": "1"}
+    parts = name.split()
+    if len(parts) == 2:
+        return f"{parts[0][0]}{roman_to_arabic.get(parts[1], parts[1])}"
+    return name
+
+def tier_badge_html(tier: int | None, *, small: bool = False) -> Markup:
+    name = tier_name(tier)
+    cls = f"tier-text tier-{tier_group(tier)}"
+    if small:
+        cls += " tier-small"
+    return Markup(f'<span class="{cls}">{escape(name)}</span>')
+
+
+def rating_solved_count_bonus(solved_count: int) -> int:
+    if solved_count <= 0:
+        return 0
+    return round(200 * (1 - (0.997 ** solved_count)))
+
+
+def tier_from_rating(rating: int) -> int:
+    for threshold, tier in SOLVED_AC_TIER_THRESHOLDS:
+        if rating >= threshold:
+            return tier
+    return 0
+
+
+def user_rating_summary(db: Session, user_or_id) -> dict:
+    user_id = user_or_id.id if hasattr(user_or_id, "id") else int(user_or_id)
+    ac_rows = (
+        db.query(Problem.id, Problem.tier)
+        .join(Submission, Submission.problem_id == Problem.id)
+        .filter(Submission.user_id == user_id, Submission.result == "AC", Problem.is_contest_only == False)  # noqa: E712
+        .distinct()
+        .all()
+    )
+    tier_values = sorted([max(0, min(30, int(row[1] or 0))) for row in ac_rows], reverse=True)
+    top100 = tier_values[:100]
+    problem_rating = sum(top100)
+    solved_count = len(tier_values)
+    solved_bonus = rating_solved_count_bonus(solved_count)
+    rating = problem_rating + solved_bonus
+    tier = tier_from_rating(rating)
+    distribution = {key: 0 for key in ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ruby", "Unrated"]}
+    for value in tier_values:
+        if value >= 26:
+            distribution["Ruby"] += 1
+        elif value >= 21:
+            distribution["Diamond"] += 1
+        elif value >= 16:
+            distribution["Platinum"] += 1
+        elif value >= 11:
+            distribution["Gold"] += 1
+        elif value >= 6:
+            distribution["Silver"] += 1
+        elif value >= 1:
+            distribution["Bronze"] += 1
+        else:
+            distribution["Unrated"] += 1
+    return {
+        "rating": rating,
+        "tier": tier,
+        "tier_name": tier_name(tier),
+        "problem_rating": problem_rating,
+        "solved_bonus": solved_bonus,
+        "solved_count": solved_count,
+        "top100_count": len(top100),
+        "distribution": distribution,
+    }
+
+
+def rating_progress_summary(rating: int) -> dict:
+    rating = max(0, int(rating or 0))
+    current_threshold = 0
+    next_threshold = None
+    next_tier = None
+    # thresholds are sorted high -> low, so reverse to walk upward.
+    for threshold, tier in sorted(SOLVED_AC_TIER_THRESHOLDS, key=lambda item: item[0]):
+        if rating >= threshold:
+            current_threshold = threshold
+        elif next_threshold is None:
+            next_threshold = threshold
+            next_tier = tier
+            break
+    if next_threshold is None:
+        return {
+            "percent": 100,
+            "remaining": 0,
+            "next_tier_name": "Master",
+            "current_threshold": current_threshold,
+            "next_threshold": current_threshold,
+        }
+    span = max(1, next_threshold - current_threshold)
+    percent = round(((rating - current_threshold) / span) * 100)
+    percent = max(0, min(100, percent))
+    return {
+        "percent": percent,
+        "remaining": max(0, next_threshold - rating),
+        "next_tier_name": tier_name(next_tier),
+        "current_threshold": current_threshold,
+        "next_threshold": next_threshold,
+    }
+
+
+def recalculate_user_rating(db: Session, target: User) -> dict:
+    summary = user_rating_summary(db, target)
+    target.ac_rating = summary["rating"]
+    target.ac_tier = summary["tier"]
+    target.ac_rating_problem_sum = summary["problem_rating"]
+    target.ac_rating_solved_bonus = summary["solved_bonus"]
+    target.solved_count = summary["solved_count"]
+    return summary
+
+
+def recalculate_all_user_ratings(db: Session) -> int:
+    users = db.query(User).filter(User.is_deleted == False).order_by(User.id.asc()).all()  # noqa: E712
+    for target in users:
+        recalculate_user_rating(db, target)
+    return len(users)
+
+
+def active_algorithm_tags(db: Session):
+    return db.query(AlgorithmTag).filter(AlgorithmTag.is_active == True).order_by(AlgorithmTag.order_index.asc(), AlgorithmTag.name.asc(), AlgorithmTag.id.asc()).all()  # noqa: E712
+
+
+def normalize_algorithm_tag_key(value: str) -> str:
+    key = re.sub(r"[^a-z0-9_]+", "_", value.strip().lower())
+    key = re.sub(r"_+", "_", key).strip("_")
+    return key[:80]
+
+
+def selected_algorithm_tags(db: Session, keys: list[str] | None) -> str:
+    if not keys:
+        return ""
+    requested = []
+    seen = set()
+    for key in keys:
+        normalized = normalize_algorithm_tag_key(str(key))
+        if normalized and normalized not in seen:
+            requested.append(normalized)
+            seen.add(normalized)
+    if not requested:
+        return ""
+    valid = {tag.key for tag in active_algorithm_tags(db)}
+    return ",".join([key for key in requested if key in valid])
+
+
+def problem_tag_keys(problem: Problem | None) -> set[str]:
+    if problem is None or not getattr(problem, "tags", ""):
+        return set()
+    return {normalize_algorithm_tag_key(item) for item in problem.tags.split(",") if normalize_algorithm_tag_key(item)}
+
+
+def problem_tag_names(db: Session, problem: Problem | None) -> list[str]:
+    keys = problem_tag_keys(problem)
+    if not keys:
+        return []
+    rows = db.query(AlgorithmTag).filter(AlgorithmTag.key.in_(keys)).order_by(AlgorithmTag.order_index.asc(), AlgorithmTag.name.asc()).all()
+    name_by_key = {tag.key: tag.name for tag in rows}
+    return [name_by_key.get(key, key) for key in (problem.tags or "").split(",") if normalize_algorithm_tag_key(key) in keys]
+
+
+def problem_tag_display_map(db: Session, problems: list[Problem]) -> dict[int, str]:
+    all_keys: set[str] = set()
+    for problem in problems:
+        all_keys.update(problem_tag_keys(problem))
+    if not all_keys:
+        return {problem.id: "-" for problem in problems}
+    rows = db.query(AlgorithmTag).filter(AlgorithmTag.key.in_(all_keys)).order_by(AlgorithmTag.order_index.asc(), AlgorithmTag.name.asc()).all()
+    name_by_key = {tag.key: tag.name for tag in rows}
+    result: dict[int, str] = {}
+    for problem in problems:
+        names = []
+        for raw_key in (problem.tags or "").split(","):
+            key = normalize_algorithm_tag_key(raw_key)
+            if key:
+                names.append(name_by_key.get(key, raw_key.strip()))
+        result[problem.id] = ", ".join(names) if names else "-"
+    return result
+
+
+def problem_form_context(db: Session, **kwargs) -> dict:
+    ctx = dict(kwargs)
+    ctx.setdefault("algorithm_tags", active_algorithm_tags(db))
+    ctx.setdefault("selected_tag_keys", problem_tag_keys(ctx.get("problem")))
+    return ctx
+
+
+
+def tier_color_hex(group: str) -> str:
+    return {
+        "ruby": "#d91e63",
+        "diamond": "#4f6fff",
+        "platinum": "#2bb8a5",
+        "gold": "#d18d16",
+        "silver": "#7c8799",
+        "bronze": "#8c4d16",
+        "unrated": "#5f6980",
+    }.get(group, "#5f6980")
+
+
+def streak_day_key(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    kst = value.astimezone(APP_TIMEZONE) - timedelta(hours=6)
+    return kst.date().isoformat()
+
+
+def profile_asset_problem_ids(asset: ProfileAsset) -> set[int]:
+    result = set()
+    for raw in (asset.condition_problem_ids or "").replace("\n", ",").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            result.add(int(raw))
+        except ValueError:
+            continue
+    return result
+
+
+def profile_asset_earned(asset: ProfileAsset, solved_ids: set[int], *, solved_dates: dict[str, int] | None = None, longest_streak: int = 0, tag_ratings: dict[str, int] | None = None) -> bool:
+    condition_type = asset.condition_type or "single"
+    required = profile_asset_problem_ids(asset)
+    if getattr(asset, "is_default", False) or condition_type == "default":
+        return True
+    if condition_type == "all":
+        return bool(required) and required.issubset(solved_ids)
+    if condition_type in {"single", "any"}:
+        return bool(required & solved_ids)
+    if condition_type == "period_solve":
+        # condition_value: days,count  예) 7,5 => 최근 7일 동안 5문제 이상 해결
+        try:
+            days_raw, count_raw = (asset.condition_value or "0,0").split(",", 1)
+            days = max(1, int(days_raw.strip()))
+            need_count = max(1, int(count_raw.strip()))
+        except Exception:
+            return False
+        solved_dates = solved_dates or {}
+        today = (datetime.now(APP_TIMEZONE) - timedelta(hours=6)).date()
+        total = 0
+        for i in range(days):
+            total += solved_dates.get((today - timedelta(days=i)).isoformat(), 0)
+        return total >= need_count
+    if condition_type == "streak":
+        try:
+            need_days = max(1, int(asset.condition_value or "0"))
+        except Exception:
+            return False
+        return longest_streak >= need_days
+    if condition_type == "tag_rating":
+        # condition_value: count,rating  예) 3,800 => 태그 레이팅 800 이상이 3개 이상
+        try:
+            count_raw, rating_raw = (asset.condition_value or "0,0").split(",", 1)
+            need_count = max(1, int(count_raw.strip()))
+            need_rating = max(1, int(rating_raw.strip()))
+        except Exception:
+            return False
+        tag_ratings = tag_ratings or {}
+        return sum(1 for rating in tag_ratings.values() if rating >= need_rating) >= need_count
+    return False
+
+
+def profile_asset_condition_text(asset: ProfileAsset) -> str:
+    condition_type = asset.condition_type or "single"
+    ids = sorted(profile_asset_problem_ids(asset))
+    joined = ", ".join(map(str, ids))
+    if getattr(asset, "is_default", False) or condition_type == "default":
+        return "기본 지급"
+    if condition_type == "all":
+        return f"문제 {joined} 모두 해결" if ids else "조건 미설정"
+    if condition_type == "any":
+        return f"문제 {joined} 중 하나 이상 해결" if ids else "조건 미설정"
+    if condition_type == "period_solve":
+        return f"최근 {asset.condition_value.replace(',', '일 동안 ')}문제 이상 해결" if asset.condition_value else "기간 해결 조건 미설정"
+    if condition_type == "streak":
+        return f"스트릭 {asset.condition_value}일 이상" if asset.condition_value else "스트릭 조건 미설정"
+    if condition_type == "tag_rating":
+        return f"태그 레이팅 조건 {asset.condition_value}" if asset.condition_value else "태그 레이팅 조건 미설정"
+    return f"문제 {joined} 해결" if ids else "조건 미설정"
+
+
+def save_profile_asset_upload(file: UploadFile | None) -> str:
+    if not file or not file.filename:
+        return ""
+    suffix = Path(file.filename).suffix.lower()
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+    if suffix not in allowed:
+        raise HTTPException(status_code=400, detail="이미지 파일만 업로드할 수 있습니다. png, jpg, webp, gif, svg를 사용하세요.")
+    filename = f"{uuid.uuid4().hex}{suffix}"
+    target = Path("uploads/profile_assets") / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return f"/uploads/profile_assets/{filename}"
+
+def save_user_profile_upload(file: UploadFile | None, kind: str) -> str:
+    if not file or not file.filename:
+        return ""
+    suffix = Path(file.filename).suffix.lower()
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    if suffix not in allowed:
+        raise HTTPException(status_code=400, detail="프로필 이미지는 png, jpg, webp, gif 파일만 업로드할 수 있습니다.")
+    safe_kind = "background" if kind == "background" else "avatar"
+    filename = f"{safe_kind}_{uuid.uuid4().hex}{suffix}"
+    target = Path("uploads/profiles") / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return f"/uploads/profiles/{filename}"
+
+def build_user_profile_context(db: Session, request: Request, viewer: User | None, target: User, **extra) -> dict:
+    submissions = db.query(Submission).filter(Submission.user_id == target.id, Submission.contest_id.is_(None)).order_by(Submission.id.desc()).all()
+    solved_ids = sorted({s.problem_id for s in submissions if s.result == "AC"})
+    solved_set = set(solved_ids)
+    tried_ids = sorted({s.problem_id for s in submissions})
+    tried_only_ids = sorted(set(tried_ids) - solved_set)
+    wrong_count = sum(1 for s in submissions if s.result not in {"AC", "JUDGING", "WAITING"})
+    ac_count = sum(1 for s in submissions if s.result == "AC")
+    result_rows = db.query(Submission.result, func.count(Submission.id)).filter(Submission.user_id == target.id).group_by(Submission.result).all()
+    solved_problems = db.query(Problem).filter(Problem.id.in_(solved_ids)).order_by(Problem.tier.desc(), Problem.id.asc()).all() if solved_ids else []
+    tried_only_problems = db.query(Problem).filter(Problem.id.in_(tried_only_ids)).order_by(Problem.id.asc()).all() if tried_only_ids else []
+    rating_summary = user_rating_summary(db, target)
+
+    tier_order = ["Ruby", "Diamond", "Platinum", "Gold", "Silver", "Bronze", "Unrated"]
+    difficulty_rows = []
+    total_solved = max(1, len(solved_ids))
+    donut_parts = []
+    start_deg = 0.0
+    for name in tier_order:
+        count = rating_summary["distribution"].get(name, 0)
+        percent = round(count * 100 / total_solved, 1) if solved_ids else 0
+        group = name.lower()
+        color = tier_color_hex(group)
+        difficulty_rows.append({"name": name, "count": count, "percent": percent, "group": group, "color": color})
+        if count > 0 and solved_ids:
+            end_deg = start_deg + (count / total_solved) * 360
+            donut_parts.append(f"{color} {start_deg:.2f}deg {end_deg:.2f}deg")
+            start_deg = end_deg
+    difficulty_donut_style = "conic-gradient(" + ", ".join(donut_parts) + ")" if donut_parts else "conic-gradient(rgba(255,255,255,.08) 0 360deg)"
+
+    solved_problem_by_id = {p.id: p for p in solved_problems}
+    tag_counts = []
+    for tag in active_algorithm_tags(db):
+        count = 0
+        tier_values = []
+        for problem in solved_problem_by_id.values():
+            if tag.key in problem_tag_keys(problem):
+                count += 1
+                # 태그 레이팅은 해결한 문제의 티어 값을 그대로 누적한다.
+                tier_values.append(max(0, min(30, int(problem.tier or 0))))
+        if count:
+            tag_rating = sum(sorted(tier_values, reverse=True)[:100]) + rating_solved_count_bonus(count)
+            tag_counts.append({"tag": tag, "count": count, "percent": round(count * 100 / total_solved, 1), "rating": tag_rating, "tier": tier_from_rating(tag_rating)})
+    tag_counts.sort(key=lambda row: (-row["rating"], -row["count"], row["tag"].name))
+
+    # Fixed radar axes: 12 o'clock math, then clockwise.
+    radar_tag_keys = ["math", "implementation", "greedy", "string", "data_structures", "graphs", "dp", "geometry"]
+    tag_rating_by_key = {row["tag"].key: row["rating"] for row in tag_counts}
+    max_tag_rating = max([tag_rating_by_key.get(key, 0) for key in radar_tag_keys] + [1])
+    radar_points = []
+    radar_labels = []
+    import math
+    for index, key in enumerate(radar_tag_keys):
+        angle = -math.pi / 2 + (2 * math.pi * index / len(radar_tag_keys))
+        rating = tag_rating_by_key.get(key, 0)
+        ratio = 0 if rating <= 0 else max(0.12, rating / max_tag_rating)
+        radius = 118 * ratio
+        x = 150 + math.cos(angle) * radius
+        y = 150 + math.sin(angle) * radius
+        lx = 150 + math.cos(angle) * 140
+        ly = 150 + math.sin(angle) * 140
+        radar_points.append(f"{x:.1f},{y:.1f}")
+        radar_labels.append({"label": key, "x": round(lx, 1), "y": round(ly, 1)})
+    tag_radar_points = " ".join(radar_points) if radar_points else "150,150"
+
+    difficulty_detail_rows = []
+    tier_counts = {int(problem.tier or 0): 0 for problem in solved_problems}
+    for problem in solved_problems:
+        try:
+            key = int(problem.tier or 0)
+        except (TypeError, ValueError):
+            key = 0
+        tier_counts[key] = tier_counts.get(key, 0) + 1
+    for value in range(0, 32):
+        count = tier_counts.get(value, 0)
+        difficulty_detail_rows.append({
+            "name": tier_name(value),
+            "group": tier_group(value),
+            "count": count,
+            "percent": "-" if not solved_ids else f"{round(count * 100 / total_solved, 1)}%",
+        })
+
+    solved_problem_tag_map = problem_tag_display_map(db, solved_problems) if solved_problems else {}
+
+    rating_tiles = []
+    for problem in sorted(solved_problems, key=lambda item: int(item.tier or 0), reverse=True)[:100]:
+        rating_tiles.append({
+            "short": tier_short(problem.tier),
+            "group": tier_group(problem.tier),
+        })
+
+    # Streak: day changes at 06:00 KST. The grid shows the latest 53 weeks.
+    ac_dates = {}
+    for submission in submissions:
+        if submission.result == "AC" and submission.created_at:
+            key = streak_day_key(submission.created_at)
+            ac_dates[key] = ac_dates.get(key, 0) + 1
+    today_key_dt = (datetime.now(APP_TIMEZONE) - timedelta(hours=6)).date()
+    start_date = today_key_dt - timedelta(days=370)
+    streak_days = []
+    for offset in range(371):
+        day = start_date + timedelta(days=offset)
+        count = ac_dates.get(day.isoformat(), 0)
+        if count <= 0:
+            level = 0
+        elif count <= 2:
+            level = 1
+        elif count <= 4:
+            level = 2
+        elif count <= 8:
+            level = 3
+        else:
+            level = 4
+        streak_days.append({"date": day.isoformat(), "count": count, "level": level})
+    current_streak = 0
+    check_day = today_key_dt
+    while ac_dates.get(check_day.isoformat(), 0) > 0:
+        current_streak += 1
+        check_day -= timedelta(days=1)
+    longest_streak = 0
+    current_run = 0
+    for day in sorted(ac_dates):
+        # Easier: scan full grid range and count consecutive active days.
+        pass
+    longest_streak = 0
+    current_run = 0
+    for item in streak_days:
+        if item["count"] > 0:
+            current_run += 1
+            longest_streak = max(longest_streak, current_run)
+        else:
+            current_run = 0
+
+    language_order = ["python", "cpp", "java", "c"]
+    language_counts = db.query(Submission.language, Submission.result, func.count(Submission.id)).filter(Submission.user_id == target.id).group_by(Submission.language, Submission.result).all()
+    raw_language_rows = {}
+    for language, result, count in language_counts:
+        raw_language_rows.setdefault(language or "unknown", []).append((result, count))
+    language_result_rows = {}
+    for language in language_order:
+        rows = raw_language_rows.pop(language, [])
+        if rows:
+            language_result_rows[language_label(language)] = rows
+    for language, rows in raw_language_rows.items():
+        if rows:
+            language_result_rows[language_label(language)] = rows
+
+    assets = db.query(ProfileAsset).filter(ProfileAsset.is_active == True).order_by(ProfileAsset.id.desc()).all()  # noqa: E712
+    badge_preview_items = []
+    background_preview_items = []
+    earned_badges = []
+    earned_backgrounds = []
+    selected_badge = None
+    selected_background = None
+    for asset in assets:
+        earned_bool = profile_asset_earned(asset, solved_set, solved_dates=ac_dates, longest_streak=longest_streak, tag_ratings=tag_rating_by_key)
+        item = {
+            "id": asset.id,
+            "icon": asset.icon_text or "★",
+            "image": asset.image_url,
+            "title": asset.title,
+            "description": profile_asset_condition_text(asset),
+            "earned": "획득" if earned_bool else "미획득",
+            "earned_bool": earned_bool,
+        }
+        if asset.asset_type == "background":
+            background_preview_items.append(item)
+            if earned_bool:
+                earned_backgrounds.append(item)
+            if asset.id == getattr(target, "selected_profile_background_id", 0) and earned_bool:
+                selected_background = item
+        else:
+            badge_preview_items.append(item)
+            if earned_bool:
+                earned_badges.append(item)
+            if asset.id == getattr(target, "selected_profile_badge_id", 0) and earned_bool:
+                selected_badge = item
+    if not badge_preview_items:
+        badge_preview_items = [
+            {"icon": "★", "title": "첫걸음", "description": "첫 문제를 해결했습니다", "earned": "-", "earned_bool": False},
+            {"icon": "AC", "title": "정답의 시작", "description": "맞았습니다!!를 달성했습니다", "earned": "-", "earned_bool": False},
+        ]
+    if not background_preview_items:
+        background_preview_items = []
+
+    user_rank = "-"
+    user_percentile = "-"
+
+    context = {
+        "request": request,
+        "user": viewer,
+        "target": target,
+        "solved_ids": solved_ids,
+        "tried_ids": tried_ids,
+        "tried_only_ids": tried_only_ids,
+        "wrong_count": wrong_count,
+        "ac_count": ac_count,
+        "result_rows": result_rows,
+        "rating_summary": rating_summary,
+        "rating_progress": rating_progress_summary(rating_summary["rating"]),
+        "accuracy_percent": round((ac_count * 100 / max(1, len(submissions))), 1) if submissions else 0,
+        "solved_problems": solved_problems,
+        "tried_only_problems": tried_only_problems,
+        "difficulty_rows": difficulty_rows,
+        "difficulty_donut_style": difficulty_donut_style,
+        "tag_rows": tag_counts,
+        "tag_radar_points": tag_radar_points,
+        "radar_labels": radar_labels,
+        "difficulty_detail_rows": difficulty_detail_rows,
+        "solved_problem_tag_map": solved_problem_tag_map,
+        "rating_problem_tiles": rating_tiles,
+        "language_result_rows": language_result_rows,
+        "badge_preview_items": badge_preview_items,
+        "background_preview_items": background_preview_items,
+        "earned_badges": earned_badges,
+        "earned_backgrounds": earned_backgrounds,
+        "selected_badge": selected_badge,
+        "selected_background": selected_background,
+        "streak_days": streak_days,
+        "current_streak": current_streak,
+        "longest_streak": longest_streak,
+        "user_rank": user_rank,
+        "user_percentile": user_percentile,
+    }
+    context.update(extra)
+    return context
+
+
+DANGEROUS_CONFIRM_TEXTS = {
+    "delete_user": "탈퇴 처리하겠습니다",
+    "reset_password": "초기화하겠습니다",
+    "bulk_create": "일괄 생성하겠습니다",
+    "bulk_reset": "일괄 초기화하겠습니다",
+    "delete_problem": "문제를 삭제하겠습니다",
+    "delete_submission": "제출을 삭제하겠습니다",
+    "delete_testcase": "테스트케이스를 삭제하겠습니다",
+    "rejudge": "재채점하겠습니다",
+    "end_contest": "대회를 종료하겠습니다",
+    "delete_contest": "대회를 삭제하겠습니다",
+}
+
+
+def require_confirm_text(confirm_text: str, action_key: str) -> None:
+    expected = DANGEROUS_CONFIRM_TEXTS[action_key]
+    if (confirm_text or "").strip() != expected:
+        raise HTTPException(status_code=400, detail=f"확인 문구를 정확히 입력해야 합니다: {expected}")
+
+
+templates_pending_globals = []
 
 def delete_user_account(db: Session, target: User) -> None:
     # 소프트 탈퇴 처리: 제출/게시글/댓글은 유지하고, 아이디만 회수 가능하게 변경한다.
@@ -95,19 +792,51 @@ def delete_user_account(db: Session, target: User) -> None:
     target.ban_reason = "탈퇴한 계정"
     target.must_change_password = False
     target.profile_background_url = ""
+    target.profile_image_url = ""
+    target.selected_profile_badge_id = 0
+    target.selected_profile_background_id = 0
     target.full_name = ""
     target.student_id = ""
     db.query(GroupJoinRequest).filter(GroupJoinRequest.user_id == target.id).delete(synchronize_session=False)
     db.query(Message).filter(Message.user_id == target.id).delete(synchronize_session=False)
 
 
+DEFAULT_ALGORITHM_TAGS = [
+    ("implementation", "구현"), ("math", "수학"), ("data_structures", "자료 구조"),
+    ("string", "문자열"), ("sorting", "정렬"), ("greedy", "그리디 알고리즘"),
+    ("bruteforcing", "브루트포스 알고리즘"), ("dp", "다이나믹 프로그래밍"),
+    ("graphs", "그래프 이론"), ("graph_traversal", "그래프 탐색"),
+    ("dfs", "깊이 우선 탐색"), ("bfs", "너비 우선 탐색"),
+    ("binary_search", "이분 탐색"), ("prefix_sum", "누적 합"),
+    ("backtracking", "백트래킹"), ("number_theory", "정수론"),
+    ("geometry", "기하학"), ("simulation", "시뮬레이션"),
+    ("shortest_path", "최단 경로"), ("dijkstra", "데이크스트라"),
+    ("segtree", "세그먼트 트리"), ("priority_queue", "우선순위 큐"),
+    ("trees", "트리"), ("combinatorics", "조합론"),
+]
+
+
+def seed_default_algorithm_tags() -> None:
+    db = SessionLocal()
+    try:
+        if db.query(AlgorithmTag).count() == 0:
+            for index, (key, name) in enumerate(DEFAULT_ALGORITHM_TAGS, start=1):
+                db.add(AlgorithmTag(key=key, name=name, order_index=index, is_active=True))
+            db.commit()
+    finally:
+        db.close()
+
+
 ensure_postgresql_schema(engine)
+seed_default_algorithm_tags()
 
 
 app = FastAPI(title="Online Judge Contest MVP")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 Path("uploads/editorials").mkdir(parents=True, exist_ok=True)
 Path("uploads/school_group_requests").mkdir(parents=True, exist_ok=True)
+Path("uploads/profile_assets").mkdir(parents=True, exist_ok=True)
+Path("uploads/profiles").mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 templates = Jinja2Templates(directory="app/templates")
 
@@ -127,6 +856,50 @@ templates.env.filters["rich_text"] = rich_text
 templates.env.globals["language_label"] = language_label
 templates.env.globals["display_username"] = display_username
 templates.env.globals["count_active_group_members"] = count_active_group_members
+templates.env.globals["tier_name"] = tier_name
+templates.env.globals["tier_group"] = tier_group
+templates.env.globals["tier_short"] = tier_short
+templates.env.globals["tier_badge"] = tier_badge_html
+templates.env.globals["user_rating_summary"] = user_rating_summary
+
+
+def ensure_csrf_token(request: Request) -> str:
+    token = request.session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session[CSRF_SESSION_KEY] = token
+    return token
+
+
+def csrf_input(request: Request) -> Markup:
+    token = ensure_csrf_token(request)
+    return Markup(f'<input type="hidden" name="{CSRF_FORM_FIELD}" value="{escape(token)}">')
+
+
+def csrf_token(request: Request) -> str:
+    return ensure_csrf_token(request)
+
+
+def session_expiry_at(seconds: int) -> str:
+    # now()는 앱 화면/세션 기준 KST naive datetime을 반환한다.
+    # 세션 만료 비교도 같은 기준으로 맞춰 timezone aware/naive 비교 오류를 막는다.
+    return (now() + timedelta(seconds=seconds)).isoformat()
+
+
+def parse_session_expiry(value: str | None) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(APP_TIMEZONE).replace(tzinfo=None)
+    return parsed
+
+
+templates.env.globals["csrf_input"] = csrf_input
+templates.env.globals["csrf_token"] = csrf_token
 
 RESULT_LABELS = {
     "AC": "맞았습니다!!",
@@ -209,11 +982,49 @@ templates.env.globals["GROUP_BOARD_WRITE_TYPES"] = GROUP_BOARD_WRITE_TYPES
 APP_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
-def now():
-    """앱 전체에서 사용할 현재 시각.
+def utc_now() -> datetime:
+    """DB에 저장하고 내부 비교에 사용할 UTC 기준 naive datetime."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    DB에는 timezone 없는 datetime-local 값과 맞추기 위해 Asia/Seoul 기준 naive datetime으로 저장/비교한다.
-    Docker 컨테이너가 UTC로 떠도 대회/연습 시간이 브라우저의 한국 시각과 어긋나지 않게 한다.
+
+def utc_to_kst(value: datetime | None) -> datetime | None:
+    """UTC naive/aware datetime을 화면 표시용 KST datetime으로 변환한다."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.astimezone(APP_TIMEZONE)
+
+
+def format_kst(value: datetime | None, default: str = "-") -> str:
+    converted = utc_to_kst(value)
+    if converted is None:
+        return default
+    return converted.strftime("%Y-%m-%d %H:%M:%S KST")
+
+
+def format_plain_time(value: datetime | None, default: str = "-") -> str:
+    """앱 로컬 시간으로 저장된 값을 초 단위까지만 표시한다.
+
+    대회/연습 시작·종료 시각처럼 사용자가 KST 기준으로 입력해 저장한
+    timezone-naive datetime은 UTC 변환 없이 그대로 표시해야 한다.
+    """
+    if value is None:
+        return default
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+templates.env.filters["kst_time"] = format_kst
+templates.env.filters["plain_time"] = format_plain_time
+
+
+def now():
+    """앱 화면/입력용 현재 시각.
+
+    대회/연습 생성 폼처럼 사용자가 한국 시간으로 입력하는 영역은 KST naive 값을 사용한다.
+    채점 큐, worker heartbeat, stuck job 판정 같은 내부 런타임 비교는 utc_now()를 사용한다.
     """
     return datetime.now(APP_TIMEZONE).replace(tzinfo=None)
 
@@ -272,6 +1083,10 @@ def cleanup_expired_submit_ban(user: Optional[User], db: Session) -> Optional[Us
 def get_current_user(request: Request, db: Session):
     user_id = request.session.get("user_id")
     if user_id is None:
+        return None
+    expires_at = parse_session_expiry(request.session.get("login_expires_at"))
+    if expires_at is not None and expires_at <= now():
+        request.session.clear()
         return None
     user = db.query(User).filter(User.id == user_id).first()
     if user and getattr(user, "is_deleted", False):
@@ -560,6 +1375,48 @@ def contest_status(contest: Contest) -> str:
     return "진행 중"
 
 
+def contest_phase_info(contest: Contest) -> dict:
+    current = now()
+    status = contest_status(contest)
+    if status == "시작 전":
+        remaining = max(int((contest.start_time - current).total_seconds()), 0)
+        return {
+            "status": status,
+            "class": "warn",
+            "time_label": "시작까지",
+            "remaining_seconds": remaining,
+            "message": "아직 대회가 시작되지 않았습니다. 일반 참가자는 문제 목록과 제출을 사용할 수 없습니다.",
+        }
+    if status == "진행 중":
+        remaining = max(int((contest.end_time - current).total_seconds()), 0)
+        return {
+            "status": status,
+            "class": "ok",
+            "time_label": "종료까지",
+            "remaining_seconds": remaining,
+            "message": "대회가 진행 중입니다. 종료 시각 이후에는 제출이 차단됩니다.",
+        }
+    return {
+        "status": status,
+        "class": "danger",
+        "time_label": "종료됨",
+        "remaining_seconds": 0,
+        "message": "대회가 종료되었습니다. 대회 전용 문제는 일반 문제로 전환되기 전까지 대회 밖에서 접근할 수 없습니다.",
+    }
+
+
+def format_seconds_korean(seconds: int) -> str:
+    seconds = max(int(seconds or 0), 0)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h}시간 {m}분 {s}초"
+
+
+templates.env.globals["contest_phase_info"] = contest_phase_info
+templates.env.globals["format_seconds_korean"] = format_seconds_korean
+
+
 def can_submit_in_contest(contest: Contest):
     current = now()
     return (not contest.is_ended) and contest.start_time <= current <= contest.end_time
@@ -672,13 +1529,29 @@ def get_attempt_count_until_ac(db: Session, user_id: int, problem_id: int, conte
     return count
 
 
-def _contest_ranking_signature(db: Session, contest_id: int) -> tuple[int, int, int]:
+def _contest_ranking_signature(db: Session, contest_id: int) -> tuple:
     count_value, max_id_value, done_count_value = db.query(
         func.count(Submission.id),
         func.coalesce(func.max(Submission.id), 0),
         func.sum(case((Submission.judge_status.in_(["DONE", "FAILED"]), 1), else_=0)),
     ).filter(Submission.contest_id == contest_id).one()
-    return int(count_value or 0), int(max_id_value or 0), int(done_count_value or 0)
+    problem_signature = tuple(
+        (link.problem_id, link.order_index, link.label, bool(link.exclude_from_ranking), int(link.score or 0))
+        for link in db.query(ContestProblem)
+        .filter(ContestProblem.contest_id == contest_id)
+        .order_by(ContestProblem.order_index.asc(), ContestProblem.problem_id.asc())
+        .all()
+    )
+    contest = db.query(Contest).filter(Contest.id == contest_id).first()
+    return (
+        int(count_value or 0),
+        int(max_id_value or 0),
+        int(done_count_value or 0),
+        bool(getattr(contest, "score_enabled", False)),
+        bool(getattr(contest, "scoreboard_freeze_enabled", False)),
+        int(getattr(contest, "scoreboard_freeze_minutes", 0) or 0),
+        problem_signature,
+    )
 
 
 def _hydrate_cached_rankings(db: Session, cached_rows: list[dict]) -> list[dict]:
@@ -690,59 +1563,120 @@ def _hydrate_cached_rankings(db: Session, cached_rows: list[dict]) -> list[dict]
         copied["user"] = users.get(row.get("user_id"))
         copied["solved_problems"] = set(row.get("solved_problem_ids", []))
         copied["best_ac"] = row.get("best_ac", {})
+        copied["cells"] = row.get("cells", {})
         hydrated.append(copied)
     return hydrated
 
 
-def build_contest_rankings(db: Session, contest: Contest) -> list[dict]:
-    contest_problem_ids = {link.problem_id for link in contest.problem_links if not link.exclude_from_ranking}
-    if not contest_problem_ids:
+def contest_elapsed_minutes(contest: Contest, submitted_at: datetime | None) -> int:
+    if submitted_at is None:
+        return 0
+    seconds = (submitted_at - contest.start_time).total_seconds()
+    return max(0, int(seconds // 60))
+
+
+def contest_freeze_start_time(contest: Contest) -> datetime | None:
+    if not getattr(contest, "scoreboard_freeze_enabled", False):
+        return None
+    minutes = int(getattr(contest, "scoreboard_freeze_minutes", 0) or 0)
+    if minutes <= 0:
+        return None
+    return contest.end_time - timedelta(minutes=minutes)
+
+
+def contest_scoreboard_frozen_now(contest: Contest) -> bool:
+    freeze_start = contest_freeze_start_time(contest)
+    current = now()
+    return bool(freeze_start is not None and contest.start_time <= current < contest.end_time and current >= freeze_start)
+
+
+def scoreboard_freeze_cutoff_for_user(user: Optional[User], contest: Contest) -> datetime | None:
+    if user and user.is_admin:
+        return None
+    if not contest_scoreboard_frozen_now(contest):
+        return None
+    return contest_freeze_start_time(contest)
+
+
+def build_contest_rankings(db: Session, contest: Contest, freeze_cutoff: datetime | None = None) -> list[dict]:
+    links = [link for link in contest.problem_links if not link.exclude_from_ranking]
+    links.sort(key=lambda link: (link.order_index, link.problem_id))
+    if not links:
         return []
 
     signature = _contest_ranking_signature(db, contest.id)
-    cached = RANKING_CACHE.get(contest.id)
+    cache_key = (contest.id, freeze_cutoff.isoformat() if freeze_cutoff else "live")
+    cached = RANKING_CACHE.get(cache_key)
     current_ts = time.time()
     if cached and cached.get("signature") == signature and current_ts - cached.get("created_ts", 0) <= RANKING_CACHE_TTL_SECONDS:
         return _hydrate_cached_rankings(db, cached.get("rows", []))
 
-    submissions = (
+    link_by_problem_id = {link.problem_id: link for link in links}
+    score_mode = bool(getattr(contest, "score_enabled", False))
+    final_pending_results = {"WAITING", "PENDING", "JUDGING"}
+    submissions_query = (
         db.query(Submission)
         .options(joinedload(Submission.user))
         .filter(Submission.contest_id == contest.id)
-        .order_by(Submission.id.asc())
-        .all()
     )
+    if freeze_cutoff is not None:
+        submissions_query = submissions_query.filter(Submission.created_at < freeze_cutoff)
+    submissions = submissions_query.order_by(Submission.created_at.asc(), Submission.id.asc()).all()
     by_user: dict[int, dict] = {}
     for submission in submissions:
-        if submission.user_id is None or submission.problem_id not in contest_problem_ids:
+        if submission.user_id is None or submission.problem_id not in link_by_problem_id:
             continue
         row = by_user.setdefault(submission.user_id, {
             "user": submission.user,
             "user_id": submission.user_id,
             "solved_problems": set(),
-            "wrong_count": 0,
-            "runtime_ms": 0,
-            "memory_kb": 0,
+            "wrong_before_ac": {link.problem_id: 0 for link in links},
+            "cells": {link.problem_id: "" for link in links},
+            "penalty": 0,
+            "last_ac_time": 0,
+            "total_score": 0,
             "best_ac": {},
         })
+        if submission.problem_id in row["solved_problems"]:
+            continue
         if submission.result == "AC":
-            current_best = row["best_ac"].get(submission.problem_id)
-            candidate = (submission.runtime_ms or 0, submission.memory_kb or 0, submission.id)
-            if current_best is None or candidate < current_best:
-                row["best_ac"][submission.problem_id] = candidate
-                row["solved_problems"].add(submission.problem_id)
-        else:
-            row["wrong_count"] += 1
+            ac_time = contest_elapsed_minutes(contest, submission.created_at)
+            wrong = row["wrong_before_ac"].get(submission.problem_id, 0)
+            link = link_by_problem_id[submission.problem_id]
+            row["solved_problems"].add(submission.problem_id)
+            row["penalty"] += ac_time + wrong * 20
+            row["last_ac_time"] = max(row["last_ac_time"], ac_time)
+            row["total_score"] += int(link.score or 0)
+            row["cells"][submission.problem_id] = "+" if wrong == 0 else f"+{wrong}"
+            row["best_ac"][submission.problem_id] = (ac_time, wrong, submission.id)
+        elif submission.result not in final_pending_results:
+            row["wrong_before_ac"][submission.problem_id] = row["wrong_before_ac"].get(submission.problem_id, 0) + 1
+            row["cells"][submission.problem_id] = f"-{row['wrong_before_ac'][submission.problem_id]}"
 
     rankings = []
     for row in by_user.values():
-        best_values = list(row["best_ac"].values())
         row["solved_count"] = len(row["solved_problems"])
-        row["runtime_ms"] = sum(item[0] for item in best_values)
-        row["memory_kb"] = sum(item[1] for item in best_values)
+        row["wrong_count"] = sum(row["wrong_before_ac"].values())
+        # 기존 템플릿/CSV 호환을 위해 필드는 남기되, ICPC식 순위에는 사용하지 않는다.
+        row["runtime_ms"] = 0
+        row["memory_kb"] = 0
         rankings.append(row)
 
-    rankings.sort(key=lambda item: (-item["solved_count"], item["wrong_count"], item["runtime_ms"], item["memory_kb"], item["user"].username if item["user"] else ""))
+    if score_mode:
+        rankings.sort(key=lambda item: (
+            -item["total_score"],
+            item["penalty"],
+            -item["solved_count"],
+            item["last_ac_time"],
+            item["user"].username if item["user"] else "",
+        ))
+    else:
+        rankings.sort(key=lambda item: (
+            -item["solved_count"],
+            item["penalty"],
+            item["last_ac_time"],
+            item["user"].username if item["user"] else "",
+        ))
     for rank, row in enumerate(rankings, start=1):
         row["rank"] = rank
 
@@ -756,10 +1690,42 @@ def build_contest_rankings(db: Session, contest: Contest) -> list[dict]:
             "runtime_ms": row["runtime_ms"],
             "memory_kb": row["memory_kb"],
             "solved_count": row["solved_count"],
+            "total_score": row["total_score"],
+            "penalty": row["penalty"],
+            "last_ac_time": row["last_ac_time"],
+            "cells": {str(k): v for k, v in row["cells"].items()},
             "best_ac": {str(k): list(v) for k, v in row["best_ac"].items()},
         })
-    RANKING_CACHE[contest.id] = {"signature": signature, "created_ts": current_ts, "rows": cache_rows}
+    RANKING_CACHE[cache_key] = {"signature": signature, "created_ts": current_ts, "rows": cache_rows}
     return rankings
+
+
+def build_contest_score_rows(db: Session, contest: Contest) -> list[list]:
+    links = [link for link in contest.problem_links if not link.exclude_from_ranking]
+    links.sort(key=lambda link: (link.order_index, link.problem_id))
+    if not links:
+        return [["message"], ["순위에 반영되는 문제가 없습니다."]]
+
+    header = ["rank", "username", "full_name", "student_id"]
+    if getattr(contest, "score_enabled", False):
+        header.append("total_score")
+    header += ["solved_count", "penalty"] + [f"{link.label}({int(link.score or 0)}점)" for link in links]
+
+    rows = [header]
+    for row in build_contest_rankings(db, contest):
+        submitter = row.get("user")
+        body = [
+            row["rank"],
+            csv_display_username(submitter),
+            "" if getattr(submitter, "is_deleted", False) else getattr(submitter, "full_name", ""),
+            "" if getattr(submitter, "is_deleted", False) else getattr(submitter, "student_id", ""),
+        ]
+        if getattr(contest, "score_enabled", False):
+            body.append(row.get("total_score", 0))
+        body += [row.get("solved_count", 0), row.get("penalty", 0)]
+        body += [row.get("cells", {}).get(link.problem_id, row.get("cells", {}).get(str(link.problem_id), "")) for link in links]
+        rows.append(body)
+    return rows
 
 
 def can_view_submission_code(viewer: Optional[User], submission: Submission) -> bool:
@@ -793,7 +1759,7 @@ def visibility_label(value: str) -> str:
 def contest_ranking_visible_to(user: Optional[User], contest: Contest) -> bool:
     if user and user.is_admin:
         return True
-    if getattr(contest, "is_exam_mode", False) or getattr(contest, "hide_ranking", False):
+    if getattr(contest, "hide_ranking", False):
         return False
     return True
 
@@ -817,42 +1783,6 @@ def extension_for_language(language: str) -> str:
     }.get(normalize_language(language), "txt")
 
 
-def build_contest_score_rows(db: Session, contest: Contest) -> list[list]:
-    if not getattr(contest, "score_enabled", False):
-        return [["message"], ["이 대회는 배점 기능을 사용하지 않습니다."]]
-    links = [link for link in contest.problem_links if not link.exclude_from_ranking]
-    links.sort(key=lambda link: (link.order_index, link.problem_id))
-    header = ["rank", "username", "full_name", "student_id", "total_score"] + [f"{link.label}({link.score})" for link in links]
-
-    submissions = (
-        db.query(Submission)
-        .options(joinedload(Submission.user))
-        .filter(Submission.contest_id == contest.id, Submission.user_id.isnot(None))
-        .all()
-    )
-    users = {}
-    accepted_pairs = set()
-    for submission in submissions:
-        if submission.user:
-            users[submission.user_id] = submission.user
-        if submission.result == "AC":
-            accepted_pairs.add((submission.user_id, submission.problem_id))
-
-    rows_data = []
-    for user_id, submitter in users.items():
-        row_scores = []
-        total = 0
-        for link in links:
-            score = int(link.score or 0) if (user_id, link.problem_id) in accepted_pairs else 0
-            row_scores.append(score)
-            total += score
-        rows_data.append({"username": submitter.username, "full_name": getattr(submitter, "full_name", ""), "student_id": getattr(submitter, "student_id", ""), "total": total, "scores": row_scores})
-    rows_data.sort(key=lambda item: (-item["total"], item["username"]))
-    rows = [header]
-    for rank, item in enumerate(rows_data, start=1):
-        rows.append([rank, item["username"], item["full_name"], item["student_id"], item["total"]] + item["scores"])
-    return rows
-
 
 def build_final_code_zip(contest: Contest, db: Session) -> io.BytesIO:
     links = sorted(contest.problem_links, key=lambda link: (link.order_index, link.problem_id))
@@ -867,8 +1797,8 @@ def build_final_code_zip(contest: Contest, db: Session) -> io.BytesIO:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         if not latest:
             zf.writestr("README.txt", "제출 코드가 없습니다.\n")
-        for (user_id, problem_id), submission in sorted(latest.items(), key=lambda item: (item[1].user.username if item[1].user else "", link_by_problem_id[item[0][1]].order_index)):
-            username = safe_filename(submission.user.username if submission.user else f"user_{user_id}")
+        for (user_id, problem_id), submission in sorted(latest.items(), key=lambda item: (csv_display_username(item[1].user) if item[1].user else "", link_by_problem_id[item[0][1]].order_index)):
+            username = safe_filename(csv_display_username(submission.user) if submission.user else f"user_{user_id}")
             link = link_by_problem_id[problem_id]
             ext = extension_for_language(submission.language)
             filename = f"{username}/{link.label}_{problem_id}_submission_{submission.id}_{submission.result}.{ext}"
@@ -885,7 +1815,7 @@ def zip_response(filename: str, buffer: io.BytesIO) -> StreamingResponse:
 def safe_judge_python(problem: Problem, code: str) -> tuple[str, str, int, int]:
     """채점 함수 예외가 서버 500으로 번지지 않도록 막는 안전 래퍼."""
     try:
-        return judge_python(problem.id, code, problem.time_limit, problem.memory_limit)
+        return judge_code(problem.id, code, "python", problem_effective_time_limit(problem, "python"), problem.memory_limit)
     except FileNotFoundError as exc:
         # Docker가 설치되지 않았거나 실행 경로에 없을 때
         return "SE", f"채점 환경 오류입니다. Docker 실행 여부를 확인하세요.\n{exc}", 0, 0
@@ -916,14 +1846,101 @@ def language_options_for_problem(problem: Problem) -> list[dict]:
     return [{"value": key, "label": language_label(key)} for key in SUPPORTED_LANGUAGES if key in allowed]
 
 
+def problem_effective_time_limit(problem: Problem, language: str) -> int:
+    return effective_time_limit_for_language(
+        getattr(problem, "time_limit", 2),
+        language,
+        getattr(problem, "python_time_limit", None),
+        getattr(problem, "c_time_limit", None),
+        getattr(problem, "cpp_time_limit", None),
+        getattr(problem, "java_time_limit", None),
+    )
+
+def language_time_limit_summary(problem: Problem) -> str:
+    parts = []
+    for lang in ["python", "c", "cpp", "java"]:
+        if lang in set(parse_allowed_languages(getattr(problem, "allowed_languages", "python"))):
+            parts.append(f"{language_label(lang)} {problem_effective_time_limit(problem, lang)}초")
+    return ", ".join(parts) if parts else "-"
+
+def optional_time_limit(value) -> int | None:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(60, v))
+
+
 def allowed_language_labels(problem: Problem) -> str:
     return ", ".join(language_label(lang) for lang in parse_allowed_languages(getattr(problem, "allowed_languages", "python")))
 
 
+def testcase_status_for_problem(problem_id: int) -> dict:
+    tests_dir = problem_dir(problem_id) / "tests"
+    input_files = sorted(tests_dir.glob("*.in")) if tests_dir.exists() else []
+    output_files = sorted(tests_dir.glob("*.out")) if tests_dir.exists() else []
+    missing_outputs = [path.name for path in input_files if not path.with_suffix(".out").exists()]
+    missing_inputs = [path.name for path in output_files if not path.with_suffix(".in").exists()]
+    empty_outputs = [path.name for path in output_files if path.exists() and path.stat().st_size == 0]
+    issues = []
+    if not tests_dir.exists():
+        issues.append("tests 폴더 없음")
+    if tests_dir.exists() and not input_files:
+        issues.append("입력 테스트케이스 없음")
+    if missing_outputs:
+        issues.append("출력 파일 누락: " + ", ".join(missing_outputs[:5]))
+    if missing_inputs:
+        issues.append("입력 파일 누락: " + ", ".join(missing_inputs[:5]))
+    if empty_outputs:
+        issues.append("빈 출력 파일: " + ", ".join(empty_outputs[:5]))
+    return {
+        "input_count": len(input_files),
+        "output_count": len(output_files),
+        "pair_count": len([path for path in input_files if path.with_suffix(".out").exists()]),
+        "missing_inputs": missing_inputs,
+        "missing_outputs": missing_outputs,
+        "empty_outputs": empty_outputs,
+        "issues": issues,
+        "ok": not issues,
+    }
+
+
+def problem_status_badges(problem: Problem) -> list[dict]:
+    badges = []
+    badges.append({"label": "공개" if problem.is_public else "비공개", "kind": "ok" if problem.is_public else "danger"})
+    badges.append({"label": "제출 가능" if problem.is_judge_ready else "채점 준비 중", "kind": "ok" if problem.is_judge_ready else "danger"})
+    if problem.is_contest_only:
+        badges.append({"label": "대회 전용", "kind": "danger"})
+    if getattr(problem, "origin_type", "regular") == "group_contest":
+        badges.append({"label": "그룹 대회 문제", "kind": "info"})
+    if getattr(problem, "force_private_submission", False):
+        badges.append({"label": "코드 비공개", "kind": "info"})
+    if getattr(problem, "review_status", "none") == "review_pending":
+        badges.append({"label": "공개 검토 요청", "kind": "danger"})
+    tc = testcase_status_for_problem(problem.id)
+    badges.append({"label": f"테케 {tc['pair_count']}개" if tc["ok"] else "테케 점검 필요", "kind": "ok" if tc["ok"] else "danger"})
+    return badges
+
+
 templates.env.globals["allowed_language_labels"] = allowed_language_labels
+templates.env.globals["language_time_limit_summary"] = language_time_limit_summary
+templates.env.globals["problem_effective_time_limit"] = problem_effective_time_limit
+templates.env.globals["language_options_for_problem"] = language_options_for_problem
+templates.env.globals["testcase_status_for_problem"] = testcase_status_for_problem
+templates.env.globals["problem_status_badges"] = problem_status_badges
 
 def language_allowed_for_problem(problem: Problem, language: str) -> bool:
     return normalize_language(language) in set(parse_allowed_languages(getattr(problem, "allowed_languages", "python")))
+
+def judge_priority_for_submission(db: Session | None, submission: Submission) -> int:
+    if db is None:
+        problem = getattr(submission, "problem", None)
+    else:
+        problem = getattr(submission, "problem", None) or db.query(Problem).filter(Problem.id == submission.problem_id).first()
+    return max(-100, min(100, int(getattr(problem, "judge_priority", 0) or 0)))
+
 
 def enqueue_submission(submission: Submission, reason: str = "채점 대기 중입니다.", db: Session | None = None, job_type: str = "judge") -> JudgeJob | None:
     submission.result = "WAITING"
@@ -933,16 +1950,17 @@ def enqueue_submission(submission: Submission, reason: str = "채점 대기 중�
     submission.memory_kb = 0
     if db is None:
         return None
-    # 기존에 남아 있던 미완료 job은 취소하고 새 job 하나만 큐에 넣는다.
+    # 같은 제출에 대해 남아 있는 진행/실패 job은 새 채점 요청으로 정리한다.
+    # FAILED job도 함께 정리해야 재채점 성공 후 과거 실패가 큐 실패 목록에 계속 남지 않는다.
     db.query(JudgeJob).filter(
         JudgeJob.submission_id == submission.id,
-        JudgeJob.status.in_(["QUEUED", "RUNNING"]),
+        JudgeJob.status.in_(["QUEUED", "RUNNING", "FAILED"]),
     ).update({
         JudgeJob.status: "CANCELED",
-        JudgeJob.finished_at: datetime.utcnow(),
+        JudgeJob.finished_at: utc_now(),
         JudgeJob.error_message: "새 채점 요청으로 취소됨",
     }, synchronize_session=False)
-    job = JudgeJob(submission_id=submission.id, job_type=job_type, status="QUEUED", priority=0)
+    job = JudgeJob(submission_id=submission.id, job_type=job_type, status="QUEUED", priority=judge_priority_for_submission(db, submission), created_at=utc_now())
     db.add(job)
     return job
 
@@ -950,6 +1968,35 @@ def enqueue_submission(submission: Submission, reason: str = "채점 대기 중�
 def rejudge_submission(submission: Submission, db: Session | None = None) -> None:
     # Docker worker가 비동기 judge_jobs 큐에서 다시 채점하도록 대기열에 넣는다.
     enqueue_submission(submission, "재채점 대기 중입니다.", db=db, job_type="rejudge")
+
+
+def normalize_rejudge_language_filters(raw_languages: list[str] | None) -> list[str]:
+    """관리자 재채점 필터에서 넘어온 언어 값을 내부 표준 언어 코드로 정리한다."""
+    languages: list[str] = []
+    for raw in raw_languages or []:
+        lang = normalize_language(raw)
+        if lang in SUPPORTED_LANGUAGES and lang not in languages:
+            languages.append(lang)
+    return languages
+
+
+def submission_matches_languages(submission: Submission, languages: list[str]) -> bool:
+    if not languages:
+        return True
+    return normalize_language(submission.language) in set(languages)
+
+
+def rejudge_submissions_in_batches(db: Session, submissions: list[Submission], languages: list[str] | None = None, commit_every: int = 100) -> int:
+    selected_languages = languages or []
+    count = 0
+    for submission in submissions:
+        if not submission_matches_languages(submission, selected_languages):
+            continue
+        rejudge_submission(submission, db=db)
+        count += 1
+        if count % commit_every == 0:
+            db.commit()
+    return count
 
 
 def render_contest_404(request: Request, user: Optional[User], contest: Optional[Contest] = None):
@@ -1305,6 +2352,8 @@ def save_editorial_image(file: UploadFile | None, contest_id: int, problem_id: i
 def is_allowed_during_school_exam(lock: dict, path: str, method: str) -> bool:
     group_id = lock["group"].id
     contest_id = lock["contest"].id
+    method = method.upper()
+
     allowed_prefixes = (
         "/static/",
         f"/contests/{contest_id}/problems/",
@@ -1313,15 +2362,25 @@ def is_allowed_during_school_exam(lock: dict, path: str, method: str) -> bool:
     )
     if path.startswith(allowed_prefixes):
         return True
+
     allowed_exact = {
-        "/logout",
         f"/groups/{group_id}",
         f"/contests/{contest_id}",
     }
     if path in allowed_exact:
         return True
-    if path == "/submit" and method.upper() == "POST":
-        return True
+
+    # 시험/평가 모드 중에도 현재 시험 대회 내부에서 이루어지는 제출과 질문은 허용한다.
+    # 질문 등록은 POST 경로가 /contests/{id}/questions/new 형태라서,
+    # 기존 허용 목록에 없으면 시험 외부 이동으로 오인되어 차단된다.
+    if method == "POST":
+        if path == "/submit":
+            return True
+        if path == f"/contests/{contest_id}/questions/new":
+            return True
+        if path.startswith("/admin/questions/") and path.endswith("/answer"):
+            return True
+
     return False
 
 
@@ -1344,10 +2403,65 @@ async def school_exam_lock_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def active_visitor_tracking_middleware(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/static/") and not path.startswith("/uploads/") and not path.startswith("/api/home-status"):
+        register_active_visitor(request)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def no_store_private_pages_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    content_type = response.headers.get("content-type", "")
+    if not path.startswith("/static/") and ("text/html" in content_type or path in {"/logout"}):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
+@app.middleware("http")
+async def csrf_protection_middleware(request: Request, call_next):
+    if request.method.upper() in UNSAFE_HTTP_METHODS:
+        expected = request.session.get(CSRF_SESSION_KEY)
+        supplied = request.headers.get("X-CSRF-Token")
+
+        # request.form() consumes the ASGI body stream.  We read the body once,
+        # temporarily replay it for token parsing, and replay it again so the
+        # actual route can still receive Form/File parameters normally.
+        body = await request.body()
+
+        async def replay_body():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._receive = replay_body
+        if supplied is None:
+            try:
+                form = await request.form()
+                supplied = form.get(CSRF_FORM_FIELD)
+            except Exception:
+                supplied = None
+        request._receive = replay_body
+
+        if not expected or not supplied or not secrets.compare_digest(str(expected), str(supplied)):
+            return HTMLResponse("잘못된 요청입니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.", status_code=403)
+    return await call_next(request)
+
+
 # SessionMiddleware must be registered after the custom HTTP middleware above so
-# request.session is available inside school_exam_lock_middleware.  In FastAPI/
-# Starlette, middleware added later wraps middleware added earlier.
-app.add_middleware(SessionMiddleware, secret_key="change-this-secret-key-before-deploy")
+# request.session is available inside school_exam_lock_middleware and
+# csrf_protection_middleware. In FastAPI/Starlette, middleware added later wraps
+# middleware added earlier.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET_KEY") or secrets.token_urlsafe(64),
+    max_age=SESSION_MAX_AGE_SECONDS,
+    same_site="lax",
+    https_only=os.getenv("SESSION_COOKIE_SECURE", "0").lower() in {"1", "true", "yes", "on"},
+)
 
 
 def parse_id_list(raw: str) -> list[int]:
@@ -1425,24 +2539,223 @@ def build_practice_board(db: Session, practice: GroupPractice, members: list[Gro
     return board
 
 
+
+def today_start() -> datetime:
+    """KST 기준 오늘 00:00을 DB 저장 기준인 UTC naive datetime으로 변환한다."""
+    today_kst = datetime.now(APP_TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_kst.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def judgeable_problem_query(db: Session, user: Optional[User]):
+    query = db.query(Problem).filter(Problem.is_contest_only == False, Problem.is_judge_ready == True)  # noqa: E712
+    if not (user and user.is_admin):
+        query = query.filter(Problem.is_public == True)
+    return query
+
+
+def home_today_submission_count(db: Session) -> int:
+    return db.query(Submission).filter(Submission.created_at >= today_start()).count()
+
+
+def home_recent_submission_logs(db: Session, limit: int = 4) -> list[dict]:
+    submissions = db.query(Submission).options(joinedload(Submission.user), joinedload(Submission.problem)).order_by(Submission.id.desc()).limit(limit).all()
+    logs = []
+    for submission in submissions:
+        username = display_username(submission.user) if submission.user else "guest"
+        problem_title = submission.problem.title if submission.problem else f"문제 {submission.problem_id}"
+        logs.append({
+            "id": submission.id,
+            "username": username,
+            "user_profile_url": f"/users/{submission.user.username}" if submission.user and not getattr(submission.user, "is_deleted", False) else "",
+            "problem_id": submission.problem_id,
+            "problem_title": problem_title,
+            "result": result_label(submission.result),
+            "result_code": submission.result,
+        })
+    return logs
+
+
+def problem_statement_excerpt(problem: Problem, max_length: int = 180) -> str:
+    text = problem.description or ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "문제 지문이 아직 작성되지 않았습니다."
+    if len(text) > max_length:
+        return text[:max_length].rstrip() + "..."
+    return text
+
+
+def home_problem_tag_names(db: Session, problem: Problem) -> str:
+    mapping = {tag.key: tag.name for tag in db.query(AlgorithmTag).filter(AlgorithmTag.is_active == True).all()}  # noqa: E712
+    names = []
+    for key in [token.strip() for token in (problem.tags or "").split(",") if token.strip()]:
+        names.append(mapping.get(key, key))
+    return ", ".join(names) if names else "태그 없음"
+
+
+def recommended_home_problems(db: Session, user: Optional[User], limit: int = 4) -> list[dict]:
+    base_query = judgeable_problem_query(db, user)
+    solved_ids: set[int] = set()
+    tag_score: dict[str, int] = {}
+    max_allowed_tier = 2
+    highest_solved_tier = 0
+
+    if user:
+        solved_rows = (
+            db.query(Problem.id, Problem.tags, Problem.tier)
+            .join(Submission, Submission.problem_id == Problem.id)
+            .filter(Submission.user_id == user.id, Submission.result == "AC", Problem.is_contest_only == False)  # noqa: E712
+            .distinct()
+            .all()
+        )
+        solved_ids = {row.id for row in solved_rows}
+        highest_solved_tier = max([int(row.tier or 0) for row in solved_rows] or [0])
+        # 추천 난이도 상한: AC한 문제 중 최고 티어보다 1단계 높은 문제까지
+        # AC 기록이 없으면 Bronze IV 수준까지 노출한다.
+        max_allowed_tier = min(30, highest_solved_tier + 1) if highest_solved_tier > 0 else 2
+        for row in solved_rows:
+            for key in [token.strip() for token in (row.tags or "").split(",") if token.strip()]:
+                tag_score[key] = tag_score.get(key, 0) + 1
+        if solved_ids:
+            base_query = base_query.filter(~Problem.id.in_(solved_ids))
+    else:
+        max_allowed_tier = 2
+
+    base_query = base_query.filter(Problem.tier <= max_allowed_tier)
+    candidates = base_query.order_by(Problem.id.desc()).limit(120).all()
+    if not candidates:
+        return []
+
+    tag_name_map = {tag.key: tag.name for tag in db.query(AlgorithmTag).filter(AlgorithmTag.is_active == True).all()}  # noqa: E712
+
+    def candidate_score(problem: Problem) -> tuple[int, int, int]:
+        keys = [token.strip() for token in (problem.tags or "").split(",") if token.strip()]
+        tag_points = max([tag_score.get(key, 0) for key in keys] or [0])
+        if highest_solved_tier > 0 and problem.tier:
+            tier_points = max(0, 10 - abs(int(problem.tier or 0) - min(max_allowed_tier, highest_solved_tier)))
+        else:
+            tier_points = max(0, int(problem.tier or 0))
+        return (tag_points, tier_points, problem.id)
+
+    selected = sorted(candidates, key=candidate_score, reverse=True)[:limit]
+    result = []
+    for problem in selected:
+        keys = [token.strip() for token in (problem.tags or "").split(",") if token.strip()]
+        first_tag = tag_name_map.get(keys[0], keys[0]) if keys else "태그 없음"
+        if user and candidate_score(problem)[0] > 0:
+            match = "자주 푼 태그"
+        elif user and highest_solved_tier > 0 and int(problem.tier or 0) == max_allowed_tier:
+            match = "최고 티어 +1 도전"
+        elif user and highest_solved_tier > 0:
+            match = "해결 티어 범위"
+        else:
+            match = "입문 추천"
+        solved_count = (
+            db.query(Submission.user_id)
+            .filter(Submission.problem_id == problem.id, Submission.result == "AC")
+            .distinct()
+            .count()
+        )
+        result.append({"problem": problem, "tag": first_tag, "match": match, "solved_count": solved_count})
+    return result
+
+
+def active_home_contests(db: Session, user: Optional[User], limit: int = 2) -> list[Contest]:
+    current = now()
+    query = db.query(Contest).filter(Contest.end_time >= current, Contest.is_ended == False)  # noqa: E712
+    if not (user and user.is_admin):
+        query = query.filter(Contest.is_public == True)
+    return query.order_by(Contest.start_time.asc(), Contest.end_time.asc()).limit(limit).all()
+
+
 @app.get("/", response_class=HTMLResponse)
 def site_home(request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
-    public_problem_query = db.query(Problem).filter(Problem.is_contest_only == False)
-    if not (user and user.is_admin):
-        public_problem_query = public_problem_query.filter(Problem.is_public == True)
-    recent_problems = public_problem_query.order_by(Problem.id.desc()).limit(8).all()
-    group_contest_ids = db.query(GroupContest.contest_id).filter(GroupContest.contest_id != None)
-    recent_contests = (
-        db.query(Contest)
-        .filter(Contest.is_public == True, ~Contest.id.in_(group_contest_ids))
-        .order_by(Contest.id.desc())
-        .limit(5)
-        .all()
-    )
+    recent_problems = judgeable_problem_query(db, user).order_by(Problem.id.desc()).limit(6).all()
+    recommended_problems = recommended_home_problems(db, user, limit=4)
+    recent_contests = active_home_contests(db, user, limit=2)
     notices = db.query(BoardPost).filter(BoardPost.board_scope == "site", BoardPost.board_type == "notice").order_by(BoardPost.is_pinned.desc(), BoardPost.id.desc()).limit(5).all()
-    board_posts = db.query(BoardPost).filter(BoardPost.board_scope == "site").order_by(BoardPost.id.desc()).limit(8).all()
-    return templates.TemplateResponse("home.html", {"request": request, "user": user, "recent_problems": recent_problems, "recent_contests": recent_contests, "notices": notices, "board_posts": board_posts, "now": now()})
+    board_posts = db.query(BoardPost).filter(BoardPost.board_scope == "site").order_by(BoardPost.id.desc()).limit(5).all()
+    queue_status = front_queue_status(db)
+    profile_summary = user_rating_summary(db, user) if user else None
+    profile_tier_class = tier_group(profile_summary["tier"]) if profile_summary else "unrated"
+    profile_progress = rating_progress_summary(profile_summary["rating"]) if profile_summary else None
+    context = {
+        "request": request,
+        "user": user,
+        "recent_problems": recent_problems,
+        "recommended_problems": recommended_problems,
+        "recent_contests": recent_contests,
+        "notices": notices,
+        "board_posts": board_posts,
+        "recent_submission_logs": home_recent_submission_logs(db),
+        "judgeable_problem_count": judgeable_problem_query(db, user).count(),
+        "today_submission_count": home_today_submission_count(db),
+        "online_user_count": count_active_visitors(),
+        "queue_status": queue_status,
+        "profile_summary": profile_summary,
+        "profile_tier_class": profile_tier_class,
+        "profile_progress": profile_progress,
+        "now": now(),
+        "problem_statement_excerpt": problem_statement_excerpt,
+    }
+    return templates.TemplateResponse("home.html", context)
+
+
+def front_queue_status(db: Session) -> dict:
+    queued_judge = db.query(JudgeJob).filter(JudgeJob.job_type == "judge", JudgeJob.status == "QUEUED").count()
+    running_judge = db.query(JudgeJob).filter(JudgeJob.job_type == "judge", JudgeJob.status == "RUNNING").count()
+    queued_rejudge = db.query(JudgeJob).filter(JudgeJob.job_type == "rejudge", JudgeJob.status == "QUEUED").count()
+    running_rejudge = db.query(JudgeJob).filter(JudgeJob.job_type == "rejudge", JudgeJob.status == "RUNNING").count()
+    waiting_submissions = db.query(Submission).filter(Submission.result == "WAITING").count()
+    total = max(queued_judge + running_judge + queued_rejudge + running_rejudge + waiting_submissions, 1)
+    return {
+        "normal": {"queued": queued_judge, "running": running_judge, "width": min(100, round(((queued_judge + running_judge) / total) * 100))},
+        "rejudge": {"queued": queued_rejudge, "running": running_rejudge, "width": min(100, round(((queued_rejudge + running_rejudge) / total) * 100))},
+        "waiting": {"count": waiting_submissions, "width": min(100, round((waiting_submissions / total) * 100))},
+        "healthy": True,
+    }
+
+
+def active_front_contest(db: Session, user: Optional[User]) -> Optional[Contest]:
+    current = now()
+    query = db.query(Contest).filter(Contest.start_time <= current, Contest.end_time >= current, Contest.is_ended == False)  # noqa: E712
+    if not (user and user.is_admin):
+        query = query.filter(Contest.is_public == True)
+    return query.order_by(Contest.end_time.asc(), Contest.id.desc()).first()
+
+
+@app.get("/api/front-status")
+def api_front_status(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    contest = active_front_contest(db, user)
+    queue = front_queue_status(db)
+    return {
+        "queue": queue,
+        "contest": {
+            "exists": contest is not None,
+            "title": contest.title if contest else "진행 중인 대회가 없습니다",
+        },
+    }
+
+
+
+@app.get("/api/active-heartbeat")
+def api_active_heartbeat(request: Request):
+    return {"online_user_count": register_active_visitor(request)}
+
+@app.get("/api/home-status")
+def api_home_status(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    return {
+        "judgeable_problem_count": judgeable_problem_query(db, user).count(),
+        "today_submission_count": home_today_submission_count(db),
+        "online_user_count": count_active_visitors(),
+        "queue": front_queue_status(db),
+        "recent_submissions": home_recent_submission_logs(db),
+    }
 
 
 @app.get("/problems", response_class=HTMLResponse)
@@ -1458,13 +2771,29 @@ def index(request: Request, q: str = "", difficulty: str = "", tag: str = "", db
         if raw_q.isdigit():
             conditions.append(Problem.id == int(raw_q))
         query = query.filter(or_(*conditions))
-    if difficulty.strip():
-        query = query.filter(Problem.difficulty == difficulty.strip())
     if tag.strip():
-        query = query.filter(Problem.tags.ilike(f"%{tag.strip()}%"))
+        tag_key = normalize_algorithm_tag_key(tag.strip())
+        query = query.filter(Problem.tags.ilike(f"%{tag_key}%"))
     problems = query.order_by(Problem.id.asc()).all()
-    difficulties = [row[0] for row in db.query(Problem.difficulty).filter(Problem.is_contest_only == False).distinct().order_by(Problem.difficulty.asc()).all() if row[0]]
-    return templates.TemplateResponse("index.html", {"request": request, "user": user, "problems": problems, "q": q, "difficulty": difficulty, "tag": tag, "difficulties": difficulties})
+    problem_tags_display = problem_tag_display_map(db, problems)
+    algorithm_tags = db.query(AlgorithmTag).filter(AlgorithmTag.is_active == True).order_by(AlgorithmTag.order_index.asc(), AlgorithmTag.name.asc()).all()  # noqa: E712
+    queue_status = front_queue_status(db)
+    active_contest = active_front_contest(db, user)
+    profile_summary = user_rating_summary(db, user) if user else None
+    profile_tier_class = tier_group(profile_summary["tier"]) if profile_summary else "unrated"
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "user": user,
+        "problems": problems,
+        "q": q,
+        "tag": tag,
+        "algorithm_tags": algorithm_tags,
+        "problem_tags_display": problem_tags_display,
+        "queue_status": queue_status,
+        "active_contest": active_contest,
+        "profile_summary": profile_summary,
+        "profile_tier_class": profile_tier_class,
+    })
 
 
 def normalize_board_type(board_type: str, *, group: bool = False, allow_all: bool = False) -> str:
@@ -1618,17 +2947,27 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
-    return templates.TemplateResponse("login.html", {"request": request, "user": get_current_user(request, db)})
+    return templates.TemplateResponse("login.html", {"request": request, "user": get_current_user(request, db), "error": request.query_params.get("error", "")})
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def login(request: Request, username: str = Form(...), password: str = Form(...), remember_me: Optional[str] = Form(None), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if user is None or getattr(user, "is_deleted", False) or not verify_password(password, user.password_hash):
         return templates.TemplateResponse("login.html", {"request": request, "user": None, "error": "아이디 또는 비밀번호가 올바르지 않습니다."})
+    old_csrf_token = request.session.get(CSRF_SESSION_KEY)
+    old_active_visitor_id = request.session.get(ACTIVE_VISITOR_SESSION_KEY)
+    if old_active_visitor_id:
+        ACTIVE_VISITORS.pop(active_guest_key(str(old_active_visitor_id)), None)
+    request.session.clear()
+    request.session[CSRF_SESSION_KEY] = old_csrf_token or secrets.token_urlsafe(32)
+    request.session[ACTIVE_VISITOR_SESSION_KEY] = old_active_visitor_id or secrets.token_urlsafe(16)
     request.session["user_id"] = user.id
     request.session["username"] = user.username
     request.session["is_admin"] = user.is_admin
+    request.session["remember_me"] = bool(remember_me)
+    request.session["login_expires_at"] = session_expiry_at(SESSION_REMEMBER_SECONDS if remember_me else SESSION_NORMAL_SECONDS)
+    ACTIVE_VISITORS[active_user_key(user.id)] = time.time()
     audit_log(db, request, user, "login", "user", user.id, "로그인")
     db.commit()
     if getattr(user, "must_change_password", False):
@@ -1659,9 +2998,18 @@ def change_password(request: Request, current_password: str = Form(""), new_pass
 
 
 @app.get("/logout")
-def logout(request: Request):
+def logout(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    lock = get_active_school_exam_lock(db, user)
+    if lock is not None:
+        return RedirectResponse(url=f"/contests/{lock['contest'].id}", status_code=303)
+    unregister_active_visitor(request)
     request.session.clear()
-    return RedirectResponse(url="/", status_code=303)
+    response = RedirectResponse(url="/", status_code=303)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/problems/{problem_id}", response_class=HTMLResponse)
@@ -1674,7 +3022,7 @@ def problem_detail(problem_id: int, request: Request, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Problem not found")
     if not problem.is_public and not (user and user.is_admin):
         raise HTTPException(status_code=404, detail="Problem not found")
-    return templates.TemplateResponse("problem.html", {"request": request, "user": user, "problem": problem, "contest": None, "link": None, "now": now(), "language_options": language_options_for_problem(problem)})
+    return templates.TemplateResponse("problem.html", {"request": request, "user": user, "problem": problem, "contest": None, "link": None, "now": now(), "language_options": language_options_for_problem(problem), "problem_tag_names": problem_tag_names(db, problem)})
 
 
 @app.post("/submit")
@@ -1821,7 +3169,7 @@ def render_submissions_page(request: Request, db: Session, only_mine: bool):
 
 
 def _active_worker_count(db: Session) -> int:
-    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(50).all()
     return len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
 
@@ -1838,18 +3186,55 @@ def _job_queue_position(db: Session, job: JudgeJob) -> int | None:
     return ahead + 1
 
 
+def _latest_job_id_subquery(db: Session):
+    return (
+        db.query(
+            JudgeJob.submission_id.label("submission_id"),
+            func.max(JudgeJob.id).label("latest_id"),
+        )
+        .group_by(JudgeJob.submission_id)
+        .subquery()
+    )
+
+
+def current_failed_jobs_query(db: Session):
+    """제출별 최신 job이 FAILED인 경우만 현재 실패로 본다."""
+    latest = _latest_job_id_subquery(db)
+    return (
+        db.query(JudgeJob)
+        .join(latest, JudgeJob.id == latest.c.latest_id)
+        .filter(JudgeJob.status == "FAILED")
+    )
+
+
+def current_failed_job_count(db: Session) -> int:
+    return current_failed_jobs_query(db).count()
+
+
+def active_queue_jobs_query(db: Session):
+    """사용자/관리자 큐 화면에서 현재 의미 있는 작업만 조회한다."""
+    latest = _latest_job_id_subquery(db)
+    return (
+        db.query(JudgeJob)
+        .outerjoin(latest, JudgeJob.id == latest.c.latest_id)
+        .filter(or_(
+            JudgeJob.status.in_(["QUEUED", "RUNNING"]),
+            and_(JudgeJob.status == "FAILED", latest.c.latest_id.isnot(None)),
+        ))
+    )
+
+
 @app.get("/queue", response_class=HTMLResponse)
 def user_judge_queue_page(request: Request, db: Session = Depends(get_db)):
     user = require_login(request, db)
     statuses = ["QUEUED", "RUNNING", "DONE", "FAILED", "CANCELED"]
-    counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in statuses}
+    counts = {key: (current_failed_job_count(db) if key == "FAILED" else db.query(JudgeJob).filter(JudgeJob.status == key).count()) for key in statuses}
     active_workers = _active_worker_count(db)
     user_jobs = (
-        db.query(JudgeJob)
+        active_queue_jobs_query(db)
         .join(Submission, JudgeJob.submission_id == Submission.id)
         .options(joinedload(JudgeJob.submission).joinedload(Submission.problem))
         .filter(Submission.user_id == user.id)
-        .filter(JudgeJob.status.in_(["QUEUED", "RUNNING", "FAILED"]))
         .order_by(JudgeJob.id.desc())
         .limit(50)
         .all()
@@ -1881,12 +3266,11 @@ def user_judge_queue_page(request: Request, db: Session = Depends(get_db)):
 @app.get("/api/queue/status")
 def api_user_judge_queue_status(request: Request, db: Session = Depends(get_db)):
     user = require_login(request, db)
-    counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in ["QUEUED", "RUNNING", "FAILED"]}
+    counts = {key: (current_failed_job_count(db) if key == "FAILED" else db.query(JudgeJob).filter(JudgeJob.status == key).count()) for key in ["QUEUED", "RUNNING", "FAILED"]}
     jobs = (
-        db.query(JudgeJob)
+        active_queue_jobs_query(db)
         .join(Submission, JudgeJob.submission_id == Submission.id)
         .filter(Submission.user_id == user.id)
-        .filter(JudgeJob.status.in_(["QUEUED", "RUNNING", "FAILED"]))
         .order_by(JudgeJob.id.desc())
         .limit(20)
         .all()
@@ -1901,10 +3285,11 @@ def api_user_judge_queue_status(request: Request, db: Session = Depends(get_db))
                 "id": job.id,
                 "submission_id": job.submission_id,
                 "status": job.status,
+                "priority": job.priority,
                 "position": _job_queue_position(db, job),
                 "worker_name": job.worker_name if job.status == "RUNNING" else "",
-                "created_at": str(job.created_at),
-                "started_at": str(job.started_at) if job.started_at else "",
+                "created_at": format_kst(job.created_at),
+                "started_at": format_kst(job.started_at, "") if job.started_at else "",
             }
             for job in jobs
         ],
@@ -1939,7 +3324,7 @@ def submission_detail(submission_id: int, request: Request, db: Session = Depend
 
 
 def requeue_stuck_judging_submissions(db: Session, minutes: int = 10, actor: str = "system") -> int:
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     running_jobs = (
         db.query(JudgeJob)
         .filter(JudgeJob.status == "RUNNING")
@@ -1955,7 +3340,7 @@ def requeue_stuck_judging_submissions(db: Session, minutes: int = 10, actor: str
         seen_submission_ids.add(job.submission_id)
         submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
         job.status = "FAILED"
-        job.finished_at = datetime.utcnow()
+        job.finished_at = utc_now()
         job.error_message = "stuck job auto requeued"
         if submission is None:
             continue
@@ -1964,8 +3349,8 @@ def requeue_stuck_judging_submissions(db: Session, minutes: int = 10, actor: str
         submission.judge_status = "PENDING"
         submission.result = "WAITING"
         submission.detail = "멈춘 채점으로 감지되어 자동으로 다시 대기열에 등록되었습니다."
-        db.add(JudgeJob(submission_id=submission.id, job_type="rejudge", status="QUEUED", priority=0))
-        db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="auto_requeue", message="stuck RUNNING judge job automatically requeued"))
+        db.add(JudgeJob(submission_id=submission.id, job_type="rejudge", status="QUEUED", priority=judge_priority_for_submission(db, submission), created_at=utc_now()))
+        db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="auto_requeue", message="stuck RUNNING judge job automatically requeued", created_at=utc_now()))
         count += 1
     if count:
         db.commit()
@@ -1975,14 +3360,14 @@ def requeue_stuck_judging_submissions(db: Session, minutes: int = 10, actor: str
 
 
 def requeue_failed_judge_jobs(db: Session, actor: str = "admin") -> int:
-    failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").all()
+    failed_jobs = current_failed_jobs_query(db).all()
     count = 0
     for job in failed_jobs:
         submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
         if submission is None:
             continue
         enqueue_submission(submission, "실패한 채점 작업이 다시 대기열에 등록되었습니다.", db=db, job_type="rejudge")
-        db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="manual_requeue_failed", message=f"failed judge job #{job.id} requeued"))
+        db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="manual_requeue_failed", message=f"failed judge job #{job.id} requeued", created_at=utc_now()))
         count += 1
     if count:
         db.commit()
@@ -1996,12 +3381,12 @@ def requeue_single_judge_job(db: Session, job_id: int, actor: str = "admin") -> 
     submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
     if submission is None:
         job.status = "FAILED"
-        job.finished_at = datetime.utcnow()
+        job.finished_at = utc_now()
         job.error_message = "연결된 제출을 찾을 수 없습니다."
         db.commit()
         return False
     enqueue_submission(submission, f"채점 작업 #{job.id}이 다시 대기열에 등록되었습니다.", db=db, job_type="rejudge")
-    db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="manual_requeue_job", message=f"judge job #{job.id} requeued"))
+    db.add(JudgeLog(submission_id=submission.id, worker_name=actor, event="manual_requeue_job", message=f"judge job #{job.id} requeued", created_at=utc_now()))
     db.commit()
     return True
 
@@ -2011,19 +3396,19 @@ def cancel_single_judge_job(db: Session, job_id: int, actor: str = "admin") -> b
     if job is None or job.status not in {"QUEUED", "RUNNING"}:
         return False
     job.status = "CANCELED"
-    job.finished_at = datetime.utcnow()
+    job.finished_at = utc_now()
     job.error_message = "관리자에 의해 취소됨"
     submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
     if submission is not None and submission.judge_status in {"PENDING", "JUDGING"}:
         submission.judge_status = "FAILED"
         submission.result = "SE"
         submission.detail = "채점 작업이 관리자에 의해 취소되었습니다."
-    db.add(JudgeLog(submission_id=job.submission_id, worker_name=actor, event="manual_cancel_job", message=f"judge job #{job.id} canceled"))
+    db.add(JudgeLog(submission_id=job.submission_id, worker_name=actor, event="manual_cancel_job", message=f"judge job #{job.id} canceled", created_at=utc_now()))
     db.commit()
     return True
 
 def count_stuck_running_judge_jobs(db: Session, minutes: int = 10) -> int:
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     return (
         db.query(JudgeJob)
         .filter(JudgeJob.status == "RUNNING")
@@ -2114,12 +3499,82 @@ def api_submission_status(submission_id: int, request: Request, db: Session = De
     return submission_status_payload(submission, detail_visible)
 
 
+def build_worker_operation_rows(db: Session) -> list[dict]:
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
+    heartbeat_rows = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(200).all()
+    workers = {}
+    for log in heartbeat_rows:
+        row = workers.setdefault(log.worker_name, {
+            "worker_name": log.worker_name,
+            "last_heartbeat": log.created_at,
+            "active": bool(log.created_at and log.created_at >= heartbeat_cutoff),
+            "current_jobs": [],
+            "recent_done": 0,
+            "recent_failed": 0,
+            "avg_runtime_ms": 0,
+        })
+        if row["last_heartbeat"] is None or (log.created_at and log.created_at > row["last_heartbeat"]):
+            row["last_heartbeat"] = log.created_at
+            row["active"] = bool(log.created_at and log.created_at >= heartbeat_cutoff)
+    running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").order_by(JudgeJob.started_at.asc()).all()
+    for job in running_jobs:
+        row = workers.setdefault(job.worker_name or "-", {
+            "worker_name": job.worker_name or "-",
+            "last_heartbeat": None,
+            "active": False,
+            "current_jobs": [],
+            "recent_done": 0,
+            "recent_failed": 0,
+            "avg_runtime_ms": 0,
+        })
+        row["current_jobs"].append(job)
+    recent_cutoff = utc_now() - timedelta(hours=1)
+    finished_jobs = db.query(JudgeJob).filter(JudgeJob.finished_at.isnot(None), JudgeJob.finished_at >= recent_cutoff).all()
+    runtime_by_worker: dict[str, list[int]] = {}
+    for job in finished_jobs:
+        name = job.worker_name or "-"
+        row = workers.setdefault(name, {
+            "worker_name": name,
+            "last_heartbeat": None,
+            "active": False,
+            "current_jobs": [],
+            "recent_done": 0,
+            "recent_failed": 0,
+            "avg_runtime_ms": 0,
+        })
+        if job.status == "DONE":
+            row["recent_done"] += 1
+        elif job.status == "FAILED":
+            row["recent_failed"] += 1
+        if job.started_at and job.finished_at:
+            runtime_by_worker.setdefault(name, []).append(max(int((job.finished_at - job.started_at).total_seconds() * 1000), 0))
+    for name, values in runtime_by_worker.items():
+        if values and name in workers:
+            workers[name]["avg_runtime_ms"] = int(sum(values) / len(values))
+    return sorted(workers.values(), key=lambda row: (not row["active"], row["worker_name"]))
+
+
+def worker_operation_payload(db: Session) -> list[dict]:
+    rows = []
+    for row in build_worker_operation_rows(db):
+        rows.append({
+            "worker_name": row["worker_name"],
+            "last_heartbeat": format_kst(row["last_heartbeat"]),
+            "active": row["active"],
+            "current_jobs": [job.submission_id for job in row["current_jobs"]],
+            "recent_done": row["recent_done"],
+            "recent_failed": row["recent_failed"],
+            "avg_runtime_ms": row["avg_runtime_ms"],
+        })
+    return rows
+
+
 @app.get("/api/worker/status")
 def api_worker_status(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
     auto_requeued = requeue_stuck_judging_submissions(db, actor="worker-status")
-    stuck_cutoff = datetime.utcnow() - timedelta(minutes=10)
-    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    stuck_cutoff = utc_now() - timedelta(minutes=10)
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(20).all()
     active_workers = len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
     return {
@@ -2127,17 +3582,18 @@ def api_worker_status(request: Request, db: Session = Depends(get_db)):
         "judging": db.query(Submission).filter(Submission.judge_status == "JUDGING").count(),
         "queued_jobs": db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count(),
         "running_jobs": db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count(),
-        "failed_jobs": db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count(),
+        "failed_jobs": current_failed_job_count(db),
         "stuck": count_stuck_running_judge_jobs(db),
         "failed": db.query(Submission).filter(Submission.judge_status == "FAILED").count(),
         "auto_requeued": auto_requeued,
         "active_workers": active_workers,
+        "worker_rows": worker_operation_payload(db),
         "recent_heartbeats": [
-            {"time": str(log.created_at), "worker": log.worker_name, "message": log.message}
+            {"time": format_kst(log.created_at), "worker": log.worker_name, "message": log.message}
             for log in recent_heartbeats[:5]
         ],
         "recent_logs": [
-            {"time": str(log.created_at), "worker": log.worker_name, "event": log.event, "submission_id": log.submission_id, "message": log.message}
+            {"time": format_kst(log.created_at), "worker": log.worker_name, "event": log.event, "submission_id": log.submission_id, "message": log.message}
             for log in db.query(JudgeLog).order_by(JudgeLog.id.desc()).limit(20).all()
         ],
     }
@@ -2147,20 +3603,21 @@ def api_worker_status(request: Request, db: Session = Depends(get_db)):
 def admin_worker_page(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
     requeue_stuck_judging_submissions(db, actor="worker-page")
-    stuck_cutoff = datetime.utcnow() - timedelta(minutes=10)
-    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    stuck_cutoff = utc_now() - timedelta(minutes=10)
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(20).all()
     active_workers = len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
     pending = db.query(Submission).filter(Submission.judge_status == "PENDING").count()
     judging = db.query(Submission).filter(Submission.judge_status == "JUDGING").count()
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
-    failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count()
+    failed_jobs = current_failed_job_count(db)
     stuck = count_stuck_running_judge_jobs(db)
     failed = db.query(Submission).filter(Submission.judge_status == "FAILED").count()
     logs = db.query(JudgeLog).order_by(JudgeLog.id.desc()).limit(100).all()
     recent_jobs = db.query(JudgeJob).order_by(JudgeJob.id.desc()).limit(100).all()
-    return templates.TemplateResponse("worker_status.html", {"request": request, "user": user, "pending": pending, "judging": judging, "stuck": stuck, "failed": failed, "queued_jobs": queued_jobs, "running_jobs": running_jobs, "failed_jobs": failed_jobs, "recent_jobs": recent_jobs, "logs": logs, "active_workers": active_workers, "recent_heartbeats": recent_heartbeats[:5]})
+    worker_rows = build_worker_operation_rows(db)
+    return templates.TemplateResponse("worker_status.html", {"request": request, "user": user, "pending": pending, "judging": judging, "stuck": stuck, "failed": failed, "queued_jobs": queued_jobs, "running_jobs": running_jobs, "failed_jobs": failed_jobs, "recent_jobs": recent_jobs, "logs": logs, "active_workers": active_workers, "recent_heartbeats": recent_heartbeats[:5], "worker_rows": worker_rows})
 
 
 @app.post("/admin/worker/requeue-stuck")
@@ -2174,16 +3631,24 @@ def admin_requeue_stuck_submissions(request: Request, db: Session = Depends(get_
 def admin_judge_queue_page(request: Request, status: str = Query(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
     statuses = ["QUEUED", "RUNNING", "DONE", "FAILED", "CANCELED"]
-    query = db.query(JudgeJob).order_by(JudgeJob.id.desc())
-    if status in statuses:
-        query = query.filter(JudgeJob.status == status)
+    if status == "FAILED":
+        query = current_failed_jobs_query(db).order_by(JudgeJob.id.desc())
     else:
-        status = ""
+        query = db.query(JudgeJob)
+        if status in statuses:
+            query = query.filter(JudgeJob.status == status)
+            if status == "QUEUED":
+                query = query.order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
+            else:
+                query = query.order_by(JudgeJob.id.desc())
+        else:
+            query = query.order_by(JudgeJob.id.desc())
+            status = ""
     jobs = query.limit(300).all()
-    counts = {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in statuses}
-    stuck_cutoff = datetime.utcnow() - timedelta(minutes=10)
+    counts = {key: (current_failed_job_count(db) if key == "FAILED" else db.query(JudgeJob).filter(JudgeJob.status == key).count()) for key in statuses}
+    stuck_cutoff = utc_now() - timedelta(minutes=10)
     stuck_count = count_stuck_running_judge_jobs(db)
-    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat").order_by(JudgeLog.id.desc()).limit(20).all()
     active_workers = len({log.worker_name for log in recent_heartbeats if log.created_at and log.created_at >= heartbeat_cutoff})
     return templates.TemplateResponse("judge_queue.html", {"request": request, "user": user, "jobs": jobs, "counts": counts, "status": status, "statuses": statuses, "stuck_count": stuck_count, "active_workers": active_workers})
@@ -2272,7 +3737,7 @@ def admin_system_status(request: Request, db: Session = Depends(get_db)):
     judging = db.query(Submission).filter(Submission.judge_status == "JUDGING").count()
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
-    failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count()
+    failed_jobs = current_failed_job_count(db)
     recent_se = db.query(Submission).filter(Submission.result == "SE").order_by(Submission.id.desc()).limit(10).all()
     recent_logs = db.query(JudgeLog).order_by(JudgeLog.id.desc()).limit(20).all()
     return templates.TemplateResponse("system_status.html", {
@@ -2318,7 +3783,8 @@ def contest_detail(contest_id: int, request: Request, db: Session = Depends(get_
         else:
             questions_query = questions_query.filter(ContestQuestion.is_public == True)
     questions = questions_query.order_by(ContestQuestion.id.desc()).all()
-    rankings = build_contest_rankings(db, contest)
+    freeze_cutoff = scoreboard_freeze_cutoff_for_user(user, contest)
+    rankings = build_contest_rankings(db, contest, freeze_cutoff=freeze_cutoff)
     group_contest = db.query(GroupContest).filter(GroupContest.contest_id == contest.id).first()
     contest_manage_allowed = bool(user and user.is_admin)
     if group_contest and group_contest.group is not None and is_group_manager(user, group_contest.group, db):
@@ -2341,10 +3807,15 @@ def contest_detail(contest_id: int, request: Request, db: Session = Depends(get_
         "problem_list_visible": problem_list_visible,
         "questions": questions,
         "rankings": rankings,
+        "scoreboard_frozen": freeze_cutoff is not None,
+        "scoreboard_freeze_start": contest_freeze_start_time(contest),
+        "ranking_links": sorted([link for link in contest.problem_links if not link.exclude_from_ranking], key=lambda link: (link.order_index, link.problem_id)),
+        "score_mode": bool(getattr(contest, "score_enabled", False)),
         "ranking_visible": contest_ranking_visible_to(user, contest),
         "contest_closed": contest_is_closed(contest),
         "contest_started": contest_has_started(contest),
         "contest_status": contest_status,
+        "phase_info": contest_phase_info(contest),
         "editorial_map": editorial_map,
         "editorial_visible": editorial_visible,
         "editorial_count": editorial_count,
@@ -2375,7 +3846,20 @@ def contest_problem(contest_id: int, label_or_id: str, request: Request, db: Ses
         if link.problem.is_contest_only:
             return render_contest_404(request, user, contest)
         return RedirectResponse(url=f"/problems/{link.problem.id}", status_code=303)
-    return templates.TemplateResponse("problem.html", {"request": request, "user": user, "problem": link.problem, "contest": contest, "link": link, "now": now(), "language_options": language_options_for_problem(link.problem)})
+    return templates.TemplateResponse("problem.html", {
+        "request": request,
+        "user": user,
+        "problem": link.problem,
+        "contest": contest,
+        "link": link,
+        "now": now(),
+        "contest_start_ms": to_app_epoch_ms(contest.start_time),
+        "contest_end_ms": to_app_epoch_ms(contest.end_time),
+        "server_now_ms": to_app_epoch_ms(now()),
+        "phase_info": contest_phase_info(contest),
+        "language_options": language_options_for_problem(link.problem),
+        "problem_tag_names": problem_tag_names(db, link.problem),
+    })
 
 
 @app.get("/groups/{group_id}/practices/{practice_id}/problems/{problem_id}", response_class=HTMLResponse)
@@ -2391,7 +3875,7 @@ def group_practice_problem(group_id: int, practice_id: int, problem_id: int, req
         raise HTTPException(status_code=403, detail="그룹 회원만 연습 문제를 볼 수 있습니다.")
     if problem.is_contest_only and not (user and user.is_admin):
         raise HTTPException(status_code=404, detail="Problem not found")
-    return templates.TemplateResponse("problem.html", {"request": request, "user": user, "problem": problem, "contest": None, "link": None, "practice": practice, "group": group, "now": now(), "language_options": language_options_for_problem(problem)})
+    return templates.TemplateResponse("problem.html", {"request": request, "user": user, "problem": problem, "contest": None, "link": None, "practice": practice, "group": group, "now": now(), "language_options": language_options_for_problem(problem), "problem_tag_names": problem_tag_names(db, problem)})
 
 
 
@@ -2426,8 +3910,6 @@ def create_question(contest_id: int, request: Request, problem_id: str = Form(""
     if contest is None:
         raise HTTPException(status_code=404, detail="Contest not found")
     require_group_contest_access(user, contest, db)
-    if contest.is_exam_mode and not user.is_admin:
-        raise HTTPException(status_code=403, detail="시험 모드에서는 질문 탭을 사용할 수 없습니다.")
     require_contest_editable(contest)
     pid = int(problem_id) if problem_id.strip().isdigit() else None
     db.add(ContestQuestion(contest_id=contest.id, problem_id=pid, user_id=user.id, content=content, is_public=False))
@@ -2481,6 +3963,7 @@ def problem_file_check_rows(db: Session) -> list[dict]:
         output_files = sorted(tests_dir.glob("*.out")) if tests_dir.exists() else []
         missing_outputs = [path.name for path in input_files if not path.with_suffix(".out").exists()]
         missing_inputs = [path.name for path in output_files if not path.with_suffix(".in").exists()]
+        empty_outputs = [path.name for path in output_files if path.exists() and path.stat().st_size == 0]
         issues = []
         if not p_dir.exists():
             issues.append("문제 폴더 없음")
@@ -2494,12 +3977,16 @@ def problem_file_check_rows(db: Session) -> list[dict]:
             issues.append("출력 파일 누락: " + ", ".join(missing_outputs[:5]))
         if missing_inputs:
             issues.append("입력 파일 누락: " + ", ".join(missing_inputs[:5]))
+        if empty_outputs:
+            issues.append("빈 출력 파일: " + ", ".join(empty_outputs[:5]))
         if p_dir.exists() and not (p_dir / "meta.json").exists():
             issues.append("meta.json 없음")
         rows.append({
             "problem": problem,
             "input_count": len(input_files),
             "output_count": len(output_files),
+            "pair_count": len([path for path in input_files if path.with_suffix(".out").exists()]),
+            "empty_output_count": len(empty_outputs),
             "status": "OK" if not issues else "WARN",
             "issues": issues,
         })
@@ -2536,7 +4023,25 @@ def collect_system_checks(db: Session) -> dict:
     group_contests_without_contest = db.query(GroupContest).filter(GroupContest.contest_id == None).count()  # noqa: E711
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
-    failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count()
+    failed_jobs = current_failed_job_count(db)
+    recent_24h = now() - timedelta(hours=24)
+    heartbeat_cutoff = utc_now() - timedelta(minutes=2)
+    recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= heartbeat_cutoff).all()
+    docker_cli_found = shutil.which("docker") is not None
+    active_worker_count = len({log.worker_name for log in recent_heartbeats})
+    operational_checks = {
+        "db_connection": "OK",
+        "problems_dir_exists": Path("problems").exists(),
+        "docker_cli_found": docker_cli_found,
+        "active_worker_count": active_worker_count,
+        "queued_jobs": queued_jobs,
+        "running_jobs": running_jobs,
+        "failed_jobs": failed_jobs,
+        "stuck_jobs": count_stuck_running_judge_jobs(db),
+        "problem_file_warning_count": sum(1 for row in file_rows if row["issues"]),
+        "deleted_user_count": db.query(User).filter(User.is_deleted == True).count(),  # noqa: E712
+        "recent_24h_submissions": db.query(Submission).filter(Submission.created_at >= recent_24h).count(),
+    }
 
     warnings = []
     warnings.extend(f"{row['problem'].id}번 문제: {', '.join(row['issues'])}" for row in file_rows if row["issues"])
@@ -2548,11 +4053,16 @@ def collect_system_checks(db: Session) -> dict:
         warnings.append(f"존재하지 않는 문제를 가리키는 제출 {broken_submission_problem_links}개")
     if group_contests_without_contest:
         warnings.append(f"대회 정보가 없는 그룹 대회 연결 {group_contests_without_contest}개")
+    if not docker_cli_found:
+        warnings.append("docker CLI를 찾지 못했습니다. 실제 채점 worker가 실패할 수 있습니다.")
+    if active_worker_count == 0:
+        warnings.append("최근 2분 안에 heartbeat를 보낸 채점 worker가 없습니다.")
 
     return {
         "schema_checks": schema_checks,
         "problem_file_rows": file_rows,
         "orphan_problem_dirs": orphan_dirs,
+        "operational_checks": operational_checks,
         "link_checks": {
             "broken_contest_links": broken_contest_links,
             "broken_submission_problem_links": broken_submission_problem_links,
@@ -2581,12 +4091,120 @@ def serialize_model_rows(db: Session, model):
     return rows
 
 
+def coerce_model_value(column, value):
+    if value is None:
+        return None
+    if isinstance(column.type, DateTime):
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(str(value))
+    return value
+
+
 def add_directory_to_zip(zf: zipfile.ZipFile, directory: Path, prefix: str) -> None:
     if not directory.exists():
         return
     for path in directory.rglob("*"):
         if path.is_file():
             zf.write(path, arcname=str(Path(prefix) / path.relative_to(directory)))
+
+
+def safe_extract_prefix(zf: zipfile.ZipFile, prefix: str, target: Path) -> None:
+    target = target.resolve()
+    for member in zf.infolist():
+        name = member.filename
+        if not name.startswith(prefix + "/"):
+            continue
+        relative = Path(name).relative_to(prefix)
+        if str(relative) in {".", ""}:
+            continue
+        destination = (target / relative).resolve()
+        if target not in destination.parents and destination != target:
+            raise ValueError("백업 파일 경로가 올바르지 않습니다.")
+        if member.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(destination, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def build_backup_zip(db: Session) -> bytes:
+    buffer = io.BytesIO()
+    created_at = now().strftime("%Y%m%d_%H%M%S")
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        manifest = {
+            "created_at": now().isoformat(sep=" "),
+            "type": "online_judge_full_backup",
+            "version": "v38_6_13",
+            "note": "DB JSON data plus problems/uploads files. This archive can be restored from the admin backup page.",
+        }
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        for model in BACKUP_MODEL_LIST:
+            zf.writestr(f"db/{model.__tablename__}.json", json.dumps(serialize_model_rows(db, model), ensure_ascii=False, indent=2))
+        checks = collect_system_checks(db)
+        diagnostic_payload = {
+            "checked_at": checks["checked_at"].isoformat(sep=" "),
+            "warning_count": checks["warning_count"],
+            "warnings": checks["warnings"],
+            "schema_checks": checks["schema_checks"],
+            "orphan_problem_dirs": checks["orphan_problem_dirs"],
+            "link_checks": checks["link_checks"],
+        }
+        zf.writestr("diagnostics.json", json.dumps(diagnostic_payload, ensure_ascii=False, indent=2))
+        add_directory_to_zip(zf, Path("problems"), "problems")
+        add_directory_to_zip(zf, Path("uploads"), "uploads")
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def list_saved_backups():
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backups = []
+    for path in BACKUP_DIR.glob("online_judge_backup_*.zip"):
+        if path.is_file():
+            backups.append({
+                "name": path.name,
+                "size_mb": round(path.stat().st_size / (1024 * 1024), 2),
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+    return sorted(backups, key=lambda item: item["name"], reverse=True)
+
+
+def restore_backup_zip(db: Session, backup_bytes: bytes) -> None:
+    with zipfile.ZipFile(io.BytesIO(backup_bytes), "r") as zf:
+        if "manifest.json" not in zf.namelist():
+            raise ValueError("manifest.json이 없는 백업 파일입니다.")
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        if manifest.get("type") not in {"online_judge_full_backup", "online_judge_basic_backup"}:
+            raise ValueError("지원하지 않는 백업 형식입니다.")
+        missing = [f"db/{model.__tablename__}.json" for model in BACKUP_MODEL_LIST if f"db/{model.__tablename__}.json" not in zf.namelist()]
+        if missing:
+            raise ValueError("백업에 일부 DB 테이블 데이터가 없습니다: " + ", ".join(missing[:5]))
+
+        # DB 복구: FK 순서 문제를 피하기 위해 전체 테이블을 한 번에 TRUNCATE CASCADE 처리합니다.
+        table_names = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+        db.execute(text(f"TRUNCATE {table_names} RESTART IDENTITY CASCADE"))
+        for model in BACKUP_MODEL_LIST:
+            rows = json.loads(zf.read(f"db/{model.__tablename__}.json").decode("utf-8"))
+            for row in rows:
+                data = {}
+                for column in model.__table__.columns:
+                    if column.name in row:
+                        data[column.name] = coerce_model_value(column, row[column.name])
+                db.add(model(**data))
+        db.commit()
+
+        # 파일 복구: 기존 폴더는 safety copy로 보존한 뒤 백업 파일로 교체합니다.
+        stamp = now().strftime("%Y%m%d_%H%M%S")
+        restore_safety_dir = BACKUP_DIR / f"before_restore_files_{stamp}"
+        restore_safety_dir.mkdir(parents=True, exist_ok=True)
+        for folder_name in ["problems", "uploads"]:
+            folder = Path(folder_name)
+            if folder.exists():
+                shutil.move(str(folder), str(restore_safety_dir / folder_name))
+            folder.mkdir(parents=True, exist_ok=True)
+            safe_extract_prefix(zf, folder_name, folder)
 
 
 @app.get("/admin/diagnostics", response_class=HTMLResponse)
@@ -2607,12 +4225,15 @@ def admin_diagnostics_json(request: Request, db: Session = Depends(get_db)):
         "schema_checks": checks["schema_checks"],
         "orphan_problem_dirs": checks["orphan_problem_dirs"],
         "link_checks": checks["link_checks"],
+        "operational_checks": checks.get("operational_checks", {}),
         "problem_file_rows": [
             {
                 "problem_id": row["problem"].id,
                 "title": row["problem"].title,
                 "input_count": row["input_count"],
                 "output_count": row["output_count"],
+                "pair_count": row.get("pair_count", 0),
+                "empty_output_count": row.get("empty_output_count", 0),
                 "status": row["status"],
                 "issues": row["issues"],
             }
@@ -2635,44 +4256,75 @@ def admin_backups(request: Request, db: Session = Depends(get_db)):
         "board_posts": db.query(BoardPost).count(),
         "warnings": checks["warning_count"],
     }
-    return templates.TemplateResponse("admin_backups.html", {"request": request, "user": user, "counts": counts, "now": now()})
+    message = request.query_params.get("message", "")
+    error = request.query_params.get("error", "")
+    return templates.TemplateResponse("admin_backups.html", {
+        "request": request,
+        "user": user,
+        "counts": counts,
+        "now": now(),
+        "backups": list_saved_backups(),
+        "message": message,
+        "error": error,
+        "restore_confirm_text": BACKUP_RESTORE_CONFIRM_TEXT,
+    })
 
 
 @app.get("/admin/backups/download")
 def download_full_backup(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
-    model_list = [
-        User, Problem, ProblemExample, ProblemNote, ProblemHint, Contest, ContestProblem,
-        ContestEditorial, Submission, ContestQuestion, Group, GroupMember, GroupJoinRequest,
-        GroupProblemSet, GroupProblemSetProblem, GroupPractice, GroupPracticeProblem,
-        GroupContest, JudgeJob, JudgeLog, BoardPost, BoardComment, Message,
-    ]
-    buffer = io.BytesIO()
     created_at = now().strftime("%Y%m%d_%H%M%S")
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        manifest = {
-            "created_at": now().isoformat(sep=" "),
-            "type": "online_judge_basic_backup",
-            "note": "JSON data plus problems/uploads files. This archive is for preservation and manual recovery, not automatic restore.",
-        }
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-        for model in model_list:
-            zf.writestr(f"db/{model.__tablename__}.json", json.dumps(serialize_model_rows(db, model), ensure_ascii=False, indent=2))
-        checks = collect_system_checks(db)
-        diagnostic_payload = {
-            "checked_at": checks["checked_at"].isoformat(sep=" "),
-            "warning_count": checks["warning_count"],
-            "warnings": checks["warnings"],
-            "schema_checks": checks["schema_checks"],
-            "orphan_problem_dirs": checks["orphan_problem_dirs"],
-            "link_checks": checks["link_checks"],
-        }
-        zf.writestr("diagnostics.json", json.dumps(diagnostic_payload, ensure_ascii=False, indent=2))
-        add_directory_to_zip(zf, Path("problems"), "problems")
-        add_directory_to_zip(zf, Path("uploads"), "uploads")
-    buffer.seek(0)
     filename = f"online_judge_backup_{created_at}.zip"
-    return StreamingResponse(buffer, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return StreamingResponse(
+        io.BytesIO(build_backup_zip(db)),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/admin/backups/create")
+def create_saved_backup(request: Request, db: Session = Depends(get_db)):
+    require_admin(request, db)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    created_at = now().strftime("%Y%m%d_%H%M%S")
+    filename = f"online_judge_backup_{created_at}.zip"
+    (BACKUP_DIR / filename).write_bytes(build_backup_zip(db))
+    return RedirectResponse(f"/admin/backups?message={urlencode({'': '서버에 백업을 저장했습니다.'})[1:]}", status_code=303)
+
+
+@app.get("/admin/backups/files/{filename}")
+def download_saved_backup(filename: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request, db)
+    if not re.fullmatch(r"online_judge_backup_\d{8}_\d{6}\.zip", filename):
+        raise HTTPException(status_code=400, detail="Invalid backup filename")
+    path = (BACKUP_DIR / filename).resolve()
+    if not path.exists() or path.parent != BACKUP_DIR.resolve():
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return StreamingResponse(
+        open(path, "rb"),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/admin/backups/restore")
+async def restore_backup(request: Request, backup_file: UploadFile = File(...), confirm_text: str = Form(""), db: Session = Depends(get_db)):
+    require_admin(request, db)
+    if confirm_text.strip() != BACKUP_RESTORE_CONFIRM_TEXT:
+        return RedirectResponse(f"/admin/backups?error={urlencode({'': '확인 문구가 일치하지 않아 복구를 취소했습니다.'})[1:]}", status_code=303)
+    if not backup_file.filename.lower().endswith(".zip"):
+        return RedirectResponse(f"/admin/backups?error={urlencode({'': 'ZIP 백업 파일만 복구할 수 있습니다.'})[1:]}", status_code=303)
+    try:
+        backup_bytes = await backup_file.read()
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        safety_name = f"before_restore_db_files_{now().strftime('%Y%m%d_%H%M%S')}.zip"
+        (BACKUP_DIR / safety_name).write_bytes(build_backup_zip(db))
+        restore_backup_zip(db, backup_bytes)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/admin/backups?error={urlencode({'': '복구 실패: ' + str(exc)})[1:]}", status_code=303)
+    request.session.clear()
+    return RedirectResponse("/login?error=백업 복구가 완료되었습니다. 다시 로그인해주세요.", status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -2701,13 +4353,92 @@ def admin_page(request: Request, db: Session = Depends(get_db)):
         "contest_status": contest_status,
         "recent_submissions": recent_submissions,
         "result_rows": result_rows,
-        "judge_queue_counts": {key: db.query(JudgeJob).filter(JudgeJob.status == key).count() for key in ["QUEUED", "RUNNING", "FAILED"]},
-        "active_worker_count": len({log.worker_name for log in db.query(JudgeLog).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= datetime.utcnow() - timedelta(minutes=2)).order_by(JudgeLog.id.desc()).limit(20).all()}),
+        "judge_queue_counts": {key: (current_failed_job_count(db) if key == "FAILED" else db.query(JudgeJob).filter(JudgeJob.status == key).count()) for key in ["QUEUED", "RUNNING", "FAILED"]},
+        "active_worker_count": len({log.worker_name for log in db.query(JudgeLog).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= utc_now() - timedelta(minutes=2)).order_by(JudgeLog.id.desc()).limit(20).all()}),
         "ranking_cache_size": len(RANKING_CACHE),
         "slow_request_count": len(SLOW_REQUESTS),
         "recent_audit_logs": db.query(AuditLog).order_by(AuditLog.id.desc()).limit(8).all(),
     })
 
+
+
+@app.get("/admin/algorithm-tags", response_class=HTMLResponse)
+def admin_algorithm_tags_page(request: Request, message: str = "", error: str = "", db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    tags = db.query(AlgorithmTag).order_by(AlgorithmTag.order_index.asc(), AlgorithmTag.name.asc(), AlgorithmTag.id.asc()).all()
+    return templates.TemplateResponse("admin_algorithm_tags.html", {"request": request, "user": user, "tags": tags, "message": message, "error": error})
+
+
+@app.post("/admin/algorithm-tags")
+def admin_create_algorithm_tag(request: Request, name: str = Form(...), key: str = Form(""), description: str = Form(""), order_index: int = Form(0), is_active: str | None = Form(None), db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    name = name.strip()[:100]
+    key = normalize_algorithm_tag_key(key or name)
+    if not name or not key:
+        return RedirectResponse("/admin/algorithm-tags?error=태그 이름과 키를 입력해야 합니다.", status_code=303)
+    if db.query(AlgorithmTag).filter(AlgorithmTag.key == key).first() is not None:
+        return RedirectResponse("/admin/algorithm-tags?error=이미 존재하는 태그 키입니다.", status_code=303)
+    tag = AlgorithmTag(key=key, name=name, description=description.strip()[:500], order_index=order_index, is_active=is_active == "on")
+    db.add(tag)
+    audit_log(db, request, user, "algorithm_tag_create", "algorithm_tag", None, f"알고리즘 태그 생성: {name} ({key})")
+    db.commit()
+    return RedirectResponse("/admin/algorithm-tags?message=태그를 추가했습니다.", status_code=303)
+
+
+@app.post("/admin/algorithm-tags/{tag_id}/edit")
+def admin_edit_algorithm_tag(tag_id: int, request: Request, name: str = Form(...), description: str = Form(""), order_index: int = Form(0), is_active: str | None = Form(None), db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    tag = db.query(AlgorithmTag).filter(AlgorithmTag.id == tag_id).first()
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Algorithm tag not found")
+    tag.name = name.strip()[:100]
+    tag.description = description.strip()[:500]
+    tag.order_index = order_index
+    tag.is_active = is_active == "on"
+    audit_log(db, request, user, "algorithm_tag_update", "algorithm_tag", tag.id, f"알고리즘 태그 수정: {tag.name}")
+    db.commit()
+    return RedirectResponse("/admin/algorithm-tags?message=태그를 수정했습니다.", status_code=303)
+
+
+@app.post("/admin/algorithm-tags/{tag_id}/delete")
+def admin_delete_algorithm_tag(tag_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    tag = db.query(AlgorithmTag).filter(AlgorithmTag.id == tag_id).first()
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Algorithm tag not found")
+    summary = f"알고리즘 태그 삭제: {tag.name} ({tag.key})"
+    db.delete(tag)
+    audit_log(db, request, user, "algorithm_tag_delete", "algorithm_tag", tag_id, summary)
+    db.commit()
+    return RedirectResponse("/admin/algorithm-tags?message=태그를 삭제했습니다.", status_code=303)
+
+
+@app.get("/admin/ratings", response_class=HTMLResponse)
+def admin_ratings_page(request: Request, message: str = "", db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    users = db.query(User).filter(User.is_deleted == False).order_by(User.ac_rating.desc(), User.id.asc()).all()  # noqa: E712
+    return templates.TemplateResponse("admin_ratings.html", {"request": request, "user": user, "users": users, "message": message})
+
+
+@app.post("/admin/ratings/recalculate-all")
+def admin_recalculate_all_ratings(request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    count = recalculate_all_user_ratings(db)
+    audit_log(db, request, user, "rating_recalculate_all", "user", None, f"전체 유저 레이팅 재계산: {count}명")
+    db.commit()
+    return RedirectResponse(f"/admin/ratings?message={count}명의 레이팅을 재계산했습니다.", status_code=303)
+
+
+@app.post("/admin/ratings/users/{user_id}/recalculate")
+def admin_recalculate_user_rating(user_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    target = db.query(User).filter(User.id == user_id, User.is_deleted == False).first()  # noqa: E712
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    summary = recalculate_user_rating(db, target)
+    audit_log(db, request, user, "rating_recalculate", "user", target.id, f"{target.username} 레이팅 재계산: {summary['rating']}")
+    db.commit()
+    return RedirectResponse(f"/admin/ratings?message={target.username}의 레이팅을 재계산했습니다.", status_code=303)
 
 
 @app.get("/admin/security", response_class=HTMLResponse)
@@ -2878,7 +4609,7 @@ def admin_performance_page(request: Request, db: Session = Depends(get_db)):
     )
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
-    failed_jobs = db.query(JudgeJob).filter(JudgeJob.status == "FAILED").count()
+    failed_jobs = current_failed_job_count(db)
     return templates.TemplateResponse("admin_performance.html", {
         "request": request,
         "user": user,
@@ -3010,7 +4741,7 @@ def build_admin_problem_query(
         else:
             query = query.filter(Problem.display_code.ilike(f"%{problem_id}%"))
 
-    allowed_types = {"all", "regular", "contest_only", "group_contest", "review_pending", "public", "private", "judge_ready", "judge_not_ready"}
+    allowed_types = {"all", "regular", "contest_only", "group_contest", "review_pending", "public", "private", "judge_ready", "judge_not_ready", "testcase_warning"}
     if registration_type not in allowed_types:
         registration_type = "all"
 
@@ -3042,10 +4773,6 @@ def build_admin_problem_query(
             Problem.problem_author.ilike(like),
         ))
 
-    difficulty = (difficulty or "").strip()
-    if difficulty:
-        query = query.filter(Problem.difficulty.ilike(f"%{difficulty}%"))
-
     tag = (tag or "").strip()
     if tag:
         query = query.filter(Problem.tags.ilike(f"%{tag}%"))
@@ -3073,24 +4800,38 @@ def admin_problem_list(
     page = max(page, 1)
     per_page = 50
     query = build_admin_problem_query(db, problem_id, registration_type, keyword, difficulty, tag, source)
-    total_count = query.count()
-    problems = query.order_by(Problem.id.asc()).offset((page - 1) * per_page).limit(per_page).all()
-    total_pages = max((total_count + per_page - 1) // per_page, 1)
+    if registration_type == "testcase_warning":
+        all_candidates = query.order_by(Problem.id.asc()).all()
+        filtered = [problem for problem in all_candidates if not testcase_status_for_problem(problem.id)["ok"]]
+        total_count = len(filtered)
+        total_pages = max((total_count + per_page - 1) // per_page, 1)
+        if page > total_pages:
+            page = total_pages
+        problems = filtered[(page - 1) * per_page: page * per_page]
+    else:
+        total_count = query.count()
+        total_pages = max((total_count + per_page - 1) // per_page, 1)
+        if page > total_pages:
+            page = total_pages
+        problems = query.order_by(Problem.id.asc()).offset((page - 1) * per_page).limit(per_page).all()
+
+    problem_tags_display = problem_tag_display_map(db, problems)
 
     return templates.TemplateResponse("admin_problems.html", {
         "request": request,
         "user": user,
         "problems": problems,
+        "problem_tags_display": problem_tags_display,
         "total_count": total_count,
         "problem_id": (problem_id or "").strip(),
         "registration_type": registration_type if registration_type else "all",
         "keyword": (keyword or "").strip(),
-        "difficulty": (difficulty or "").strip(),
         "tag": (tag or "").strip(),
         "source": (source or "").strip(),
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,
+        "language_options": [{"value": key, "label": language_label(key)} for key in SUPPORTED_LANGUAGES],
     })
 
 
@@ -3103,30 +4844,30 @@ def admin_bulk_rejudge_problems(
     difficulty: str = Form(""),
     tag: str = Form(""),
     source: str = Form(""),
+    confirm_text: str = Form(""),
+    rejudge_languages: list[str] = Form([]),
     db: Session = Depends(get_db),
 ):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "rejudge")
+    selected_languages = normalize_rejudge_language_filters(rejudge_languages)
     query = build_admin_problem_query(db, problem_id, registration_type, keyword, difficulty, tag, source)
     problem_ids = [row[0] for row in query.with_entities(Problem.id).all()]
     if not problem_ids:
         return templates.TemplateResponse("rejudge_result.html", {"request": request, "user": user, "problem": None, "count": 0, "message": "조건에 맞는 문제가 없습니다."})
 
     submissions = db.query(Submission).filter(Submission.problem_id.in_(problem_ids)).order_by(Submission.id.asc()).all()
-    count = 0
-    for submission in submissions:
-        rejudge_submission(submission, db=db)
-        count += 1
-        if count % 100 == 0:
-            db.commit()
-    create_message(db, user.id, "대량 재채점 등록 완료", f"검색 조건에 해당하는 {len(problem_ids)}개 문제의 제출 {count}건을 재채점 큐에 등록했습니다.", "rejudge_notice")
-    audit_log(db, request, user, "bulk_rejudge", "problem", None, f"{len(problem_ids)}개 문제, {count}건 재채점 등록")
+    count = rejudge_submissions_in_batches(db, submissions, selected_languages)
+    language_note = f" / 언어: {', '.join(language_label(lang) for lang in selected_languages)}" if selected_languages else ""
+    create_message(db, user.id, "대량 재채점 등록 완료", f"검색 조건에 해당하는 {len(problem_ids)}개 문제의 제출 {count}건을 재채점 큐에 등록했습니다.{language_note}", "rejudge_notice")
+    audit_log(db, request, user, "bulk_rejudge", "problem", None, f"{len(problem_ids)}개 문제, {count}건 재채점 등록{language_note}")
     db.commit()
     return templates.TemplateResponse("rejudge_result.html", {
         "request": request,
         "user": user,
         "problem": None,
         "count": count,
-        "message": f"검색 조건에 해당하는 {len(problem_ids)}개 문제의 제출을 재채점 큐에 등록했습니다.",
+        "message": f"검색 조건에 해당하는 {len(problem_ids)}개 문제의 제출을 재채점 큐에 등록했습니다.{language_note}",
     })
 
 
@@ -3153,6 +4894,10 @@ def copy_problem(
         output_description=source_problem.output_description,
         time_limit=source_problem.time_limit,
         memory_limit=source_problem.memory_limit,
+        python_time_limit=getattr(source_problem, "python_time_limit", None),
+        c_time_limit=getattr(source_problem, "c_time_limit", None),
+        cpp_time_limit=getattr(source_problem, "cpp_time_limit", None),
+        java_time_limit=getattr(source_problem, "java_time_limit", None),
         is_contest_only=False,
         is_public=False,
         force_private_submission=source_problem.force_private_submission,
@@ -3202,21 +4947,46 @@ def copy_problem(
 @app.get("/admin/problems/new", response_class=HTMLResponse)
 def new_problem_page(request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
-    return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "problem": None, "test_inputs": "1 2\n---\n10 20", "test_outputs": "3\n---\n30", "testcases": [], "sample_inputs": "1 2", "sample_outputs": "3", "action": "/admin/problems/new", "notes_text": "", "hints_text": ""})
+    return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, problem=None, test_inputs="1 2\n---\n10 20", test_outputs="3\n---\n30", testcases=[], sample_inputs="1 2", sample_outputs="3", action="/admin/problems/new", notes_text="", hints_text=""))
 
 
 @app.post("/admin/problems/new")
-def create_problem(request: Request, problem_id: int = Form(...), title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(...), memory_limit: int = Form(...), difficulty: str = Form("미지정"), tags: str = Form(""), source: str = Form(""), problem_author: str = Form(""), error_finder: str = Form(""), typo_finder: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), sample_inputs: str = Form(""), sample_outputs: str = Form(""), notes_text: str = Form(""), hints_text: str = Form(""), is_public: str | None = Form(None), is_judge_ready: str | None = Form(None), force_private_submission: str | None = Form(None), allowed_languages: str = Form("python,c,cpp,java"), db: Session = Depends(get_db)):
+def create_problem(request: Request, problem_id: int = Form(...), title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(...), memory_limit: int = Form(...), python_time_limit: str = Form(""), c_time_limit: str = Form(""), cpp_time_limit: str = Form(""), java_time_limit: str = Form(""), difficulty: str = Form(""), tier: int = Form(0), judge_priority: int = Form(0), algorithm_tags: list[str] = Form([]), source: str = Form(""), problem_author: str = Form(""), error_finder: str = Form(""), typo_finder: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), sample_inputs: str = Form(""), sample_outputs: str = Form(""), notes_text: str = Form(""), hints_text: str = Form(""), is_public: str | None = Form(None), is_judge_ready: str | None = Form(None), force_private_submission: str | None = Form(None), allowed_languages: str = Form("python,c,cpp,java"), db: Session = Depends(get_db)):
     user = require_admin(request, db)
     if db.query(Problem).filter(Problem.id == problem_id).first():
-        return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": "이미 존재하는 문제 번호입니다.", "problem": None, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": [], "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": "/admin/problems/new", "notes_text": notes_text, "hints_text": hints_text})
+        return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, error="이미 존재하는 문제 번호입니다.", problem=None, test_inputs=test_inputs, test_outputs=test_outputs, testcases=[], sample_inputs=sample_inputs, sample_outputs=sample_outputs, action="/admin/problems/new", notes_text=notes_text, hints_text=hints_text, selected_tag_keys=set(algorithm_tags or [])))
     try:
-        if time_limit < 1 or time_limit > 10 or memory_limit < 16 or memory_limit > 1024:
-            raise ValueError("시간 제한은 1~10초, 메모리 제한은 16~1024MB 범위여야 합니다.")
+        if time_limit < 1 or time_limit > 60 or memory_limit < 16 or memory_limit > 4096:
+            raise ValueError("시간 제한은 1~60초, 메모리 제한은 16~4096MB 범위여야 합니다.")
         save_problem_files(problem_id, title, description, input_description, output_description, time_limit, memory_limit, test_inputs, test_outputs, ",".join(parse_allowed_languages(allowed_languages)))
     except ValueError as e:
-        return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": None, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": [], "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": "/admin/problems/new", "notes_text": notes_text, "hints_text": hints_text})
-    problem = Problem(id=problem_id, title=title, description=description, input_description=input_description, output_description=output_description, time_limit=time_limit, memory_limit=memory_limit, difficulty=difficulty.strip() or "미지정", tags=tags.strip(), source=source.strip(), problem_author=problem_author.strip(), error_finder=error_finder.strip(), typo_finder=typo_finder.strip(), allowed_languages=",".join(parse_allowed_languages(allowed_languages)), is_contest_only=False, is_public=is_public == "on", is_judge_ready=is_judge_ready == "on", force_private_submission=force_private_submission == "on")
+        return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, error=str(e), problem=None, test_inputs=test_inputs, test_outputs=test_outputs, testcases=[], sample_inputs=sample_inputs, sample_outputs=sample_outputs, action="/admin/problems/new", notes_text=notes_text, hints_text=hints_text, selected_tag_keys=set(algorithm_tags or [])))
+    problem = Problem(
+        id=problem_id,
+        title=title,
+        description=description,
+        input_description=input_description,
+        output_description=output_description,
+        time_limit=time_limit,
+        memory_limit=memory_limit,
+        python_time_limit=optional_time_limit(python_time_limit),
+        c_time_limit=optional_time_limit(c_time_limit),
+        cpp_time_limit=optional_time_limit(cpp_time_limit),
+        java_time_limit=optional_time_limit(java_time_limit),
+        difficulty=tier_name(tier),
+        tier=max(0, min(30, int(tier or 0))),
+        judge_priority=max(-100, min(100, int(judge_priority or 0))),
+        tags=selected_algorithm_tags(db, algorithm_tags),
+        source=source.strip(),
+        problem_author=problem_author.strip(),
+        error_finder=error_finder.strip(),
+        typo_finder=typo_finder.strip(),
+        allowed_languages=",".join(parse_allowed_languages(allowed_languages)),
+        is_contest_only=False,
+        is_public=is_public == "on",
+        is_judge_ready=is_judge_ready == "on",
+        force_private_submission=force_private_submission == "on",
+    )
     db.add(problem)
     db.flush()
     try:
@@ -3224,7 +4994,7 @@ def create_problem(request: Request, problem_id: int = Form(...), title: str = F
         save_problem_notes_and_hints(db, problem, notes_text, hints_text)
     except ValueError as e:
         db.rollback()
-        return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": None, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": [], "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": "/admin/problems/new", "notes_text": notes_text, "hints_text": hints_text})
+        return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, error=str(e), problem=None, test_inputs=test_inputs, test_outputs=test_outputs, testcases=[], sample_inputs=sample_inputs, sample_outputs=sample_outputs, action="/admin/problems/new", notes_text=notes_text, hints_text=hints_text, selected_tag_keys=set(algorithm_tags or [])))
     audit_log(db, request, user, "problem_create", "problem", problem.id, f"문제 생성: {problem.title}")
     db.commit()
     return RedirectResponse(url="/", status_code=303)
@@ -3240,11 +5010,11 @@ def edit_problem_page(problem_id: int, request: Request, db: Session = Depends(g
         raise HTTPException(status_code=403, detail="문제 수정 권한이 없습니다.")
     test_inputs, test_outputs = read_problem_tests(problem.id)
     sample_inputs, sample_outputs = read_problem_examples(problem)
-    return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "problem": problem, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": read_problem_testcases(problem.id), "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": f"/admin/problems/{problem.id}/edit", "notes_text": read_problem_notes(problem), "hints_text": read_problem_hints(problem), "can_manage_public_settings": can_manage_problem_public_settings(user, problem)})
+    return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, problem=problem, test_inputs=test_inputs, test_outputs=test_outputs, testcases=read_problem_testcases(problem.id), sample_inputs=sample_inputs, sample_outputs=sample_outputs, action=f"/admin/problems/{problem.id}/edit", notes_text=read_problem_notes(problem), hints_text=read_problem_hints(problem), can_manage_public_settings=can_manage_problem_public_settings(user, problem)))
 
 
 @app.post("/admin/problems/{problem_id}/edit")
-def edit_problem(problem_id: int, request: Request, title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(...), memory_limit: int = Form(...), difficulty: str = Form("미지정"), tags: str = Form(""), source: str = Form(""), problem_author: str = Form(""), error_finder: str = Form(""), typo_finder: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), sample_inputs: str = Form(""), sample_outputs: str = Form(""), notes_text: str = Form(""), hints_text: str = Form(""), is_public: str | None = Form(None), is_judge_ready: str | None = Form(None), force_private_submission: str | None = Form(None), allowed_languages: str = Form("python,c,cpp,java"), promote: str | None = Form(None), db: Session = Depends(get_db)):
+def edit_problem(problem_id: int, request: Request, title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(...), memory_limit: int = Form(...), python_time_limit: str = Form(""), c_time_limit: str = Form(""), cpp_time_limit: str = Form(""), java_time_limit: str = Form(""), difficulty: str = Form(""), tier: int = Form(0), judge_priority: int = Form(0), algorithm_tags: list[str] = Form([]), source: str = Form(""), problem_author: str = Form(""), error_finder: str = Form(""), typo_finder: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), sample_inputs: str = Form(""), sample_outputs: str = Form(""), notes_text: str = Form(""), hints_text: str = Form(""), is_public: str | None = Form(None), is_judge_ready: str | None = Form(None), force_private_submission: str | None = Form(None), allowed_languages: str = Form("python,c,cpp,java"), promote: str | None = Form(None), db: Session = Depends(get_db)):
     user = require_login(request, db)
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
     if problem is None:
@@ -3252,19 +5022,25 @@ def edit_problem(problem_id: int, request: Request, title: str = Form(...), desc
     if not can_edit_problem(user, problem, db):
         raise HTTPException(status_code=403, detail="문제 수정 권한이 없습니다.")
     try:
-        if time_limit < 1 or time_limit > 10 or memory_limit < 16 or memory_limit > 1024:
-            raise ValueError("시간 제한은 1~10초, 메모리 제한은 16~1024MB 범위여야 합니다.")
+        if time_limit < 1 or time_limit > 60 or memory_limit < 16 or memory_limit > 4096:
+            raise ValueError("시간 제한은 1~60초, 메모리 제한은 16~4096MB 범위여야 합니다.")
         save_problem_files(problem_id, title, description, input_description, output_description, time_limit, memory_limit, test_inputs, test_outputs, ",".join(parse_allowed_languages(allowed_languages)))
     except ValueError as e:
-        return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": problem, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": read_problem_testcases(problem.id), "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": f"/admin/problems/{problem.id}/edit", "notes_text": read_problem_notes(problem), "hints_text": read_problem_hints(problem)})
+        return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, error=str(e), problem=problem, test_inputs=test_inputs, test_outputs=test_outputs, testcases=read_problem_testcases(problem.id), sample_inputs=sample_inputs, sample_outputs=sample_outputs, action=f"/admin/problems/{problem.id}/edit", notes_text=read_problem_notes(problem), hints_text=read_problem_hints(problem), selected_tag_keys=set(algorithm_tags or [])))
     problem.title = title
     problem.description = description
     problem.input_description = input_description
     problem.output_description = output_description
     problem.time_limit = time_limit
     problem.memory_limit = memory_limit
-    problem.difficulty = difficulty.strip() or "미지정"
-    problem.tags = tags.strip()
+    problem.python_time_limit = optional_time_limit(python_time_limit)
+    problem.c_time_limit = optional_time_limit(c_time_limit)
+    problem.cpp_time_limit = optional_time_limit(cpp_time_limit)
+    problem.java_time_limit = optional_time_limit(java_time_limit)
+    problem.tier = max(0, min(30, int(tier or 0)))
+    problem.judge_priority = max(-100, min(100, int(judge_priority or 0)))
+    problem.difficulty = tier_name(problem.tier)
+    problem.tags = selected_algorithm_tags(db, algorithm_tags)
     problem.source = source.strip()
     problem.problem_author = problem_author.strip()
     problem.error_finder = error_finder.strip()
@@ -3279,7 +5055,7 @@ def edit_problem(problem_id: int, request: Request, title: str = Form(...), desc
         save_problem_notes_and_hints(db, problem, notes_text, hints_text)
     except ValueError as e:
         db.rollback()
-        return templates.TemplateResponse("problem_form.html", {"request": request, "user": user, "error": str(e), "problem": problem, "test_inputs": test_inputs, "test_outputs": test_outputs, "testcases": read_problem_testcases(problem.id), "sample_inputs": sample_inputs, "sample_outputs": sample_outputs, "action": f"/admin/problems/{problem.id}/edit", "notes_text": read_problem_notes(problem), "hints_text": read_problem_hints(problem)})
+        return templates.TemplateResponse("problem_form.html", problem_form_context(db, request=request, user=user, error=str(e), problem=problem, test_inputs=test_inputs, test_outputs=test_outputs, testcases=read_problem_testcases(problem.id), sample_inputs=sample_inputs, sample_outputs=sample_outputs, action=f"/admin/problems/{problem.id}/edit", notes_text=read_problem_notes(problem), hints_text=read_problem_hints(problem), selected_tag_keys=set(algorithm_tags or [])))
     promoted = False
     if promote == "on" and can_manage_problem_public_settings(user, problem):
         promoted = True
@@ -3294,33 +5070,59 @@ def edit_problem(problem_id: int, request: Request, title: str = Form(...), desc
 
 
 @app.post("/admin/problems/{problem_id}/rejudge")
-def rejudge_problem(problem_id: int, request: Request, db: Session = Depends(get_db)):
+def rejudge_problem(problem_id: int, request: Request, confirm_text: str = Form(""), rejudge_languages: list[str] = Form([]), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "rejudge")
+    selected_languages = normalize_rejudge_language_filters(rejudge_languages)
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
     if problem is None:
         raise HTTPException(status_code=404, detail="Problem not found")
 
     submissions = db.query(Submission).filter(Submission.problem_id == problem.id).order_by(Submission.id.asc()).all()
-    count = 0
-    for submission in submissions:
-        rejudge_submission(submission, db=db)
-        count += 1
-        # 너무 오래 트랜잭션을 잡지 않도록 제출 하나마다 반영한다.
-        db.commit()
-    create_message(db, user.id, "문제 재채점 등록 완료", f"{problem.id}번 문제의 제출 {count}건을 재채점 큐에 등록했습니다.", "rejudge_notice")
-    audit_log(db, request, user, "problem_rejudge", "problem", problem.id, f"{count}건 재채점 등록")
+    count = rejudge_submissions_in_batches(db, submissions, selected_languages, commit_every=50)
+    language_note = f" / 언어: {', '.join(language_label(lang) for lang in selected_languages)}" if selected_languages else ""
+    create_message(db, user.id, "문제 재채점 등록 완료", f"{problem.id}번 문제의 제출 {count}건을 재채점 큐에 등록했습니다.{language_note}", "rejudge_notice")
+    audit_log(db, request, user, "problem_rejudge", "problem", problem.id, f"{count}건 재채점 등록{language_note}")
     db.commit()
     return templates.TemplateResponse("rejudge_result.html", {
         "request": request,
         "user": user,
         "problem": problem,
         "count": count,
+        "message": f"{problem.id}번 문제의 제출을 재채점 큐에 등록했습니다.{language_note}",
+    })
+
+
+@app.post("/admin/submissions/rejudge-after")
+def rejudge_submissions_after(
+    request: Request,
+    start_submission_id: int = Form(...),
+    confirm_text: str = Form(""),
+    rejudge_languages: list[str] = Form([]),
+    db: Session = Depends(get_db),
+):
+    user = require_admin(request, db)
+    require_confirm_text(confirm_text, "rejudge")
+    selected_languages = normalize_rejudge_language_filters(rejudge_languages)
+    submissions = db.query(Submission).filter(Submission.id >= start_submission_id).order_by(Submission.id.asc()).all()
+    count = rejudge_submissions_in_batches(db, submissions, selected_languages)
+    language_note = f" / 언어: {', '.join(language_label(lang) for lang in selected_languages)}" if selected_languages else ""
+    create_message(db, user.id, "범위 재채점 등록 완료", f"제출 #{start_submission_id} 이후 제출 {count}건을 재채점 큐에 등록했습니다.{language_note}", "rejudge_notice")
+    audit_log(db, request, user, "submission_range_rejudge", "submission", start_submission_id, f"제출 #{start_submission_id} 이후 {count}건 재채점 등록{language_note}")
+    db.commit()
+    return templates.TemplateResponse("rejudge_result.html", {
+        "request": request,
+        "user": user,
+        "problem": None,
+        "count": count,
+        "message": f"제출 #{start_submission_id} 이후 제출을 재채점 큐에 등록했습니다.{language_note}",
     })
 
 
 @app.post("/admin/submissions/{submission_id}/rejudge")
-def rejudge_single_submission(submission_id: int, request: Request, db: Session = Depends(get_db)):
+def rejudge_single_submission(submission_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "rejudge")
     submission = db.query(Submission).filter(Submission.id == submission_id).first()
     if submission is None:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -3331,8 +5133,9 @@ def rejudge_single_submission(submission_id: int, request: Request, db: Session 
 
 
 @app.post("/admin/submissions/{submission_id}/delete")
-def delete_submission_admin(submission_id: int, request: Request, db: Session = Depends(get_db)):
+def delete_submission_admin(submission_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "delete_submission")
     submission = db.query(Submission).filter(Submission.id == submission_id).first()
     if submission is None:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -3343,8 +5146,9 @@ def delete_submission_admin(submission_id: int, request: Request, db: Session = 
 
 
 @app.post("/admin/problems/{problem_id}/delete")
-def delete_problem_admin(problem_id: int, request: Request, db: Session = Depends(get_db)):
+def delete_problem_admin(problem_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "delete_problem")
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
     if problem is None:
         raise HTTPException(status_code=404, detail="Problem not found")
@@ -3378,8 +5182,9 @@ def edit_testcase_route(problem_id: int, case_index: int, request: Request, inpu
 
 
 @app.post("/admin/problems/{problem_id}/testcases/{case_index}/delete")
-def delete_testcase_route(problem_id: int, case_index: int, request: Request, db: Session = Depends(get_db)):
+def delete_testcase_route(problem_id: int, case_index: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     require_admin(request, db)
+    require_confirm_text(confirm_text, "delete_testcase")
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
     if problem is None:
         raise HTTPException(status_code=404, detail="Problem not found")
@@ -3391,8 +5196,9 @@ def delete_testcase_route(problem_id: int, case_index: int, request: Request, db
 
 
 @app.post("/admin/contests/{contest_id}/rejudge")
-def rejudge_contest(contest_id: int, request: Request, db: Session = Depends(get_db)):
+def rejudge_contest(contest_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "rejudge")
     contest = db.query(Contest).filter(Contest.id == contest_id).first()
     if contest is None:
         raise HTTPException(status_code=404, detail="Contest not found")
@@ -3406,8 +5212,9 @@ def rejudge_contest(contest_id: int, request: Request, db: Session = Depends(get
 
 
 @app.post("/admin/group-practices/{practice_id}/rejudge")
-def rejudge_group_practice(practice_id: int, request: Request, db: Session = Depends(get_db)):
+def rejudge_group_practice(practice_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "rejudge")
     practice = db.query(GroupPractice).filter(GroupPractice.id == practice_id).first()
     if practice is None:
         raise HTTPException(status_code=404, detail="Practice not found")
@@ -3417,7 +5224,7 @@ def rejudge_group_practice(practice_id: int, request: Request, db: Session = Dep
     require_group_owner_or_admin(user, group)
     submissions = db.query(Submission).filter(Submission.practice_id == practice.id).order_by(Submission.id.asc()).all()
     for submission in submissions:
-        rejudge_submission(submission)
+        rejudge_submission(submission, db=db)
         db.commit()
     return RedirectResponse(url=f"/groups/{practice.group_id}#practice", status_code=303)
 
@@ -3457,7 +5264,7 @@ def create_group(request: Request, name: str = Form(...), description: str = For
 
 
 @app.get("/groups/{group_id}", response_class=HTMLResponse)
-def group_detail(group_id: int, request: Request, board_type: str = Query("all"), db: Session = Depends(get_db)):
+def group_detail(group_id: int, request: Request, board_type: str = Query("all"), invite_error: str = Query(""), invite_message: str = Query(""), db: Session = Depends(get_db)):
     user = get_current_user(request, db)
     group = db.query(Group).filter(Group.id == group_id).first()
     if group is None:
@@ -3519,6 +5326,8 @@ def group_detail(group_id: int, request: Request, board_type: str = Query("all")
         "selectable_contests": selectable_contests,
         "default_start": format_datetime_local(default_start_dt),
         "default_end": format_datetime_local(default_end_dt),
+        "invite_error": invite_error,
+        "invite_message": invite_message,
     })
 
 
@@ -3760,7 +5569,7 @@ def transfer_group_owner(group_id: int, request: Request, username: str = Form(.
     require_group_owner_or_site_admin(user, group)
 
     target = db.query(User).filter(User.username == username).first()
-    if target is None:
+    if target is None or getattr(target, "is_deleted", False):
         raise HTTPException(status_code=404, detail="User not found")
 
     target_membership = db.query(GroupMember).filter(GroupMember.group_id == group.id, GroupMember.user_id == target.id).first()
@@ -3813,14 +5622,19 @@ def invite_group_member(group_id: int, request: Request, username: str = Form(..
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
+    username = username.strip()
     target = db.query(User).filter(User.username == username).first()
-    if target is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    if target is None or getattr(target, "is_deleted", False):
+        query = urlencode({"invite_error": f"존재하지 않는 사용자입니다: {username}"})
+        return RedirectResponse(url=f"/groups/{group.id}?{query}#overview", status_code=303)
     exists = db.query(GroupMember).filter(GroupMember.group_id == group.id, GroupMember.user_id == target.id).first()
     if exists is None:
         create_message(db, target.id, "그룹 초대", f"{group.name} 그룹에 초대되었습니다. 수락하면 그룹 회원이 됩니다.", "group_invite", related_group_id=group.id, action_status="pending")
         db.commit()
-    return RedirectResponse(url=f"/groups/{group.id}#overview", status_code=303)
+        query = urlencode({"invite_message": f"{target.username} 사용자에게 그룹 초대 메세지를 보냈습니다."})
+        return RedirectResponse(url=f"/groups/{group.id}?{query}#overview", status_code=303)
+    query = urlencode({"invite_message": f"{target.username} 사용자는 이미 그룹 회원입니다."})
+    return RedirectResponse(url=f"/groups/{group.id}?{query}#overview", status_code=303)
 
 
 @app.post("/groups/{group_id}/members/bulk-add")
@@ -3835,7 +5649,7 @@ def bulk_add_existing_group_members(group_id: int, request: Request, csv_text: s
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
         target = db.query(User).filter(User.username == row["username"]).first()
-        if target is None:
+        if target is None or getattr(target, "is_deleted", False):
             skipped += 1
             continue
         exists = db.query(GroupMember).filter(GroupMember.group_id == group.id, GroupMember.user_id == target.id).first()
@@ -3849,8 +5663,9 @@ def bulk_add_existing_group_members(group_id: int, request: Request, csv_text: s
 
 
 @app.post("/groups/{group_id}/members/bulk-create")
-def bulk_create_group_members(group_id: int, request: Request, csv_text: str = Form(""), csv_file: UploadFile | None = File(None), db: Session = Depends(get_db)):
+def bulk_create_group_members(group_id: int, request: Request, csv_text: str = Form(""), csv_file: UploadFile | None = File(None), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "bulk_create")
     group = db.query(Group).filter(Group.id == group_id).first()
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -3860,12 +5675,20 @@ def bulk_create_group_members(group_id: int, request: Request, csv_text: str = F
     added_members = 0
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
+        username_error = validate_username_value(row["username"])
+        password_error = validate_password_value(row["password"])
+        if username_error or password_error:
+            skipped += 1
+            continue
         target = db.query(User).filter(User.username == row["username"]).first()
         if target is None:
             target = User(username=row["username"], password_hash=hash_password(row["password"]), full_name=row["full_name"], student_id=row["student_id"], must_change_password=True)
             db.add(target)
             db.flush()
             created_users += 1
+        elif getattr(target, "is_deleted", False):
+            skipped += 1
+            continue
         exists = db.query(GroupMember).filter(GroupMember.group_id == group.id, GroupMember.user_id == target.id).first()
         if exists:
             skipped += 1
@@ -4015,8 +5838,9 @@ def edit_group_problemset_description(group_id: int, problem_set_id: int, reques
 
 
 @app.post("/admin/group-contests/{group_contest_id}/rejudge")
-def rejudge_group_contest(group_contest_id: int, request: Request, db: Session = Depends(get_db)):
+def rejudge_group_contest(group_contest_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "rejudge")
     group_contest = db.query(GroupContest).filter(GroupContest.id == group_contest_id).first()
     if group_contest is None or group_contest.contest_id is None:
         raise HTTPException(status_code=404, detail="Group contest not found")
@@ -4026,7 +5850,7 @@ def rejudge_group_contest(group_contest_id: int, request: Request, db: Session =
     require_group_owner_or_admin(user, group)
     submissions = db.query(Submission).filter(Submission.contest_id == group_contest.contest_id).order_by(Submission.id.asc()).all()
     for submission in submissions:
-        rejudge_submission(submission)
+        rejudge_submission(submission, db=db)
         db.commit()
     return RedirectResponse(url=f"/groups/{group.id}#contests", status_code=303)
 
@@ -4072,7 +5896,7 @@ def create_group_problemset(group_id: int, request: Request, title: str = Form(.
 
 
 @app.post("/groups/{group_id}/contests/new")
-def create_group_contest_shell(group_id: int, request: Request, title: str = Form(...), description: str = Form(""), start_time: str = Form(""), end_time: str = Form(""), problem_order: str = Form(""), contest_id: str = Form(""), is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), is_public: str | None = Form(None), score_enabled: str | None = Form(None), result_display_mode: str = Form("full"), db: Session = Depends(get_db)):
+def create_group_contest_shell(group_id: int, request: Request, title: str = Form(...), description: str = Form(""), start_time: str = Form(""), end_time: str = Form(""), problem_order: str = Form(""), contest_id: str = Form(""), is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), is_public: str | None = Form(None), score_enabled: str | None = Form(None), scoreboard_freeze_enabled: str | None = Form(None), scoreboard_freeze_minutes: int = Form(0), result_display_mode: str = Form("full"), db: Session = Depends(get_db)):
     user = require_login(request, db)
     group = db.query(Group).filter(Group.id == group_id).first()
     if group is None:
@@ -4093,9 +5917,11 @@ def create_group_contest_shell(group_id: int, request: Request, title: str = For
             if exam_enabled:
                 validate_school_exam_contest_overlap(db, group, linked_contest.start_time, linked_contest.end_time, exclude_contest_id=linked_contest.id)
             linked_contest.is_exam_mode = exam_enabled
-            linked_contest.hide_ranking = hide_ranking == "on" or linked_contest.is_exam_mode
+            linked_contest.hide_ranking = hide_ranking == "on"
             linked_contest.is_public = is_public == "on"
             linked_contest.score_enabled = score_enabled == "on"
+            linked_contest.scoreboard_freeze_enabled = scoreboard_freeze_enabled == "on"
+            linked_contest.scoreboard_freeze_minutes = max(0, int(scoreboard_freeze_minutes or 0))
             linked_contest.result_display_mode = "full"
             db.commit()
             return RedirectResponse(url=f"/groups/{group.id}#contests", status_code=303)
@@ -4121,6 +5947,8 @@ def create_group_contest_shell(group_id: int, request: Request, title: str = For
             is_public=(is_public == "on"),
             score_enabled=(score_enabled == "on"),
         )
+        group_contest.contest.scoreboard_freeze_enabled = scoreboard_freeze_enabled == "on"
+        group_contest.contest.scoreboard_freeze_minutes = max(0, int(scoreboard_freeze_minutes or 0))
         if not getattr(group_contest, "display_number", 0):
             group_contest.display_number = next_group_contest_display_number(db, group.id)
         db.commit()
@@ -4156,8 +5984,9 @@ def update_group_contest_visibility(group_id: int, group_contest_id: int, reques
 
 
 @app.post("/groups/{group_id}/contests/{group_contest_id}/delete")
-def delete_group_contest_route(group_id: int, group_contest_id: int, request: Request, db: Session = Depends(get_db)):
+def delete_group_contest_route(group_id: int, group_contest_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "delete_contest")
     group = db.query(Group).filter(Group.id == group_id).first()
     group_contest = db.query(GroupContest).filter(GroupContest.id == group_contest_id, GroupContest.group_id == group_id).first()
     if group is None or group_contest is None:
@@ -4383,7 +6212,7 @@ def new_contest_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/admin/contests/new")
-def create_contest(request: Request, title: str = Form(...), description: str = Form(...), start_time: str = Form(...), end_time: str = Form(...), problem_ids: list[int] = Form(default=[]), problem_order: str = Form(""), is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), score_enabled: str | None = Form(None), result_display_mode: str = Form("full"), db: Session = Depends(get_db)):
+def create_contest(request: Request, title: str = Form(...), description: str = Form(...), start_time: str = Form(...), end_time: str = Form(...), problem_ids: list[int] = Form(default=[]), problem_order: str = Form(""), is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), score_enabled: str | None = Form(None), scoreboard_freeze_enabled: str | None = Form(None), scoreboard_freeze_minutes: int = Form(0), result_display_mode: str = Form("full"), db: Session = Depends(get_db)):
     user = require_admin(request, db)
     if is_exam_mode == "on":
         return render_contest_form(request, user, db, start_time, end_time, "시험/평가 모드는 학교 분반 승인 그룹의 그룹 대회에서만 사용할 수 있습니다.")
@@ -4401,7 +6230,9 @@ def create_contest(request: Request, title: str = Form(...), description: str = 
         )
         contest.display_number = next_site_contest_display_number(db)
         contest.is_exam_mode = is_exam_mode == "on"
-        contest.hide_ranking = hide_ranking == "on" or contest.is_exam_mode
+        contest.hide_ranking = hide_ranking == "on"
+        contest.scoreboard_freeze_enabled = scoreboard_freeze_enabled == "on"
+        contest.scoreboard_freeze_minutes = max(0, int(scoreboard_freeze_minutes or 0))
         contest.result_display_mode = "full"
         db.commit()
         db.refresh(contest)
@@ -4418,7 +6249,7 @@ def create_contest(request: Request, title: str = Form(...), description: str = 
 
 
 @app.post("/admin/contests/{contest_id}/settings")
-def update_contest_settings(contest_id: int, request: Request, is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), is_public: str | None = Form(None), score_enabled: str | None = Form(None), start_time: str = Form(""), end_time: str = Form(""), db: Session = Depends(get_db)):
+def update_contest_settings(contest_id: int, request: Request, is_exam_mode: str | None = Form(None), hide_ranking: str | None = Form(None), is_public: str | None = Form(None), score_enabled: str | None = Form(None), scoreboard_freeze_enabled: str | None = Form(None), scoreboard_freeze_minutes: int = Form(0), start_time: str = Form(""), end_time: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
     contest = db.query(Contest).filter(Contest.id == contest_id).first()
     if contest is None:
@@ -4445,12 +6276,14 @@ def update_contest_settings(contest_id: int, request: Request, is_exam_mode: str
         exam_enabled = is_exam_mode == "on"
         ensure_site_contest_exam_mode_disabled(exam_enabled)
         contest.is_exam_mode = exam_enabled
-        contest.hide_ranking = hide_ranking == "on" or contest.is_exam_mode
+        contest.hide_ranking = hide_ranking == "on"
     else:
         # 그룹 대회의 시험 모드는 생성 시에만 결정한다. 이후에는 공개 여부/순위표 숨김만 조정한다.
-        contest.hide_ranking = hide_ranking == "on" or contest.is_exam_mode
+        contest.hide_ranking = hide_ranking == "on"
         contest.is_public = is_public == "on"
     contest.score_enabled = score_enabled == "on"
+    contest.scoreboard_freeze_enabled = scoreboard_freeze_enabled == "on"
+    contest.scoreboard_freeze_minutes = max(0, int(scoreboard_freeze_minutes or 0))
     contest.result_display_mode = "full"
     audit_log(db, request, user, "contest_settings", "contest", contest.id, f"대회 설정 변경: {contest.title}")
     db.commit()
@@ -4458,8 +6291,9 @@ def update_contest_settings(contest_id: int, request: Request, is_exam_mode: str
 
 
 @app.post("/admin/contests/{contest_id}/end")
-def end_contest(contest_id: int, request: Request, db: Session = Depends(get_db)):
+def end_contest(contest_id: int, request: Request, confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "end_contest")
     contest = db.query(Contest).filter(Contest.id == contest_id).first()
     if contest is None:
         raise HTTPException(status_code=404, detail="Contest not found")
@@ -4493,7 +6327,7 @@ def add_existing_problem(contest_id: int, request: Request, problem_id: int = Fo
 
 
 @app.post("/admin/contests/{contest_id}/add-new-problem")
-def add_new_contest_problem(contest_id: int, request: Request, problem_id: str = Form(""), title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(2), memory_limit: int = Form(256), score: int = Form(100), sample_inputs: str = Form(""), sample_outputs: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), is_judge_ready: str | None = Form("on"), publish_notice_agree: str | None = Form(None), db: Session = Depends(get_db)):
+def add_new_contest_problem(contest_id: int, request: Request, problem_id: str = Form(""), title: str = Form(...), description: str = Form(...), input_description: str = Form(...), output_description: str = Form(...), time_limit: int = Form(2), memory_limit: int = Form(256), python_time_limit: str = Form(""), c_time_limit: str = Form(""), cpp_time_limit: str = Form(""), java_time_limit: str = Form(""), score: int = Form(100), sample_inputs: str = Form(""), sample_outputs: str = Form(""), test_inputs: str = Form(...), test_outputs: str = Form(...), is_judge_ready: str | None = Form("on"), publish_notice_agree: str | None = Form(None), db: Session = Depends(get_db)):
     user = require_login(request, db)
     contest = db.query(Contest).filter(Contest.id == contest_id).first()
     if contest is None:
@@ -4525,6 +6359,12 @@ def add_new_contest_problem(contest_id: int, request: Request, problem_id: str =
         output_description=output_description,
         time_limit=time_limit,
         memory_limit=memory_limit,
+        python_time_limit=optional_time_limit(python_time_limit),
+        c_time_limit=optional_time_limit(c_time_limit),
+        cpp_time_limit=optional_time_limit(cpp_time_limit),
+        java_time_limit=optional_time_limit(java_time_limit),
+        difficulty="미지정",
+        tier=0,
         is_contest_only=True,
         is_public=False,
         is_judge_ready=is_judge_ready == "on",
@@ -4668,6 +6508,8 @@ def reorder_contest_problems(contest_id: int, request: Request, ordered_problem_
 def member_display_name(user: User | None) -> str:
     if user is None:
         return ""
+    if getattr(user, "is_deleted", False):
+        return "탈퇴한 사용자"
     if user.full_name:
         return f"{user.full_name}({user.username})"
     return user.username
@@ -4729,16 +6571,17 @@ def export_group_members_csv(group_id: int, request: Request, db: Session = Depe
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).join(User, User.id == GroupMember.user_id).order_by(User.student_id.asc(), User.username.asc()).all()
+    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).join(User, User.id == GroupMember.user_id).filter(User.is_deleted == False, User.is_admin == False).order_by(User.student_id.asc(), User.username.asc()).all()
     rows = [["username", "full_name", "student_id", "role", "joined_at"]]
     for member in members:
-        rows.append([member.user.username if member.user else member.user_id, member.user.full_name if member.user else "", member.user.student_id if member.user else "", member.role, member.joined_at])
+        rows.append([csv_display_username(member.user) if member.user else member.user_id, "" if (member.user and member.user.is_deleted) else (member.user.full_name if member.user else ""), "" if (member.user and member.user.is_deleted) else (member.user.student_id if member.user else ""), member.role, member.joined_at])
     return csv_response(f"group_{group.id}_members.csv", rows)
 
 
 @app.post("/groups/{group_id}/members/bulk-delete")
-def bulk_delete_group_members(group_id: int, request: Request, member_ids: list[int] = Form([]), db: Session = Depends(get_db)):
+def bulk_delete_group_members(group_id: int, request: Request, member_ids: list[int] = Form([]), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "delete_user")
     group = db.query(Group).filter(Group.id == group_id).first()
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -4771,21 +6614,23 @@ def bulk_update_group_member_roles(group_id: int, request: Request, member_ids: 
 
 
 @app.post("/groups/{group_id}/members/bulk-reset-password")
-def bulk_reset_group_member_passwords(group_id: int, request: Request, member_ids: list[int] = Form([]), new_password: str = Form("changeme1234"), db: Session = Depends(get_db)):
+def bulk_reset_group_member_passwords(group_id: int, request: Request, member_ids: list[int] = Form([]), new_password: str = Form("changeme1234"), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    require_confirm_text(confirm_text, "bulk_reset")
     group = db.query(Group).filter(Group.id == group_id).first()
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
     require_school_group_member_admin(user, group, db)
-    if len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    password_error = validate_password_value(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     member_user_ids = {member.user_id for member in db.query(GroupMember).filter(GroupMember.group_id == group.id).all()}
     for member_user_id in member_ids:
         if member_user_id not in member_user_ids:
             continue
         target = db.query(User).filter(User.id == member_user_id).first()
-        if target:
+        if target and not getattr(target, "is_deleted", False):
             target.password_hash = hash_password(new_password)
             target.must_change_password = True
             create_message(db, target.id, "비밀번호 초기화", f"{group.name} 그룹 관리자가 비밀번호를 초기화했습니다. 로그인 후 새 비밀번호로 변경해 주세요.", "notice", related_group_id=group.id)
@@ -4803,7 +6648,7 @@ def export_group_practice_progress_csv(practice_id: int, request: Request, db: S
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).all()
+    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).join(User, User.id == GroupMember.user_id).filter(User.is_deleted == False, User.is_admin == False).all()
     problem_ids = [item.problem_id for item in db.query(GroupPracticeProblem).filter(GroupPracticeProblem.practice_id == practice.id).order_by(GroupPracticeProblem.order_index.asc(), GroupPracticeProblem.id.asc()).all()]
     return csv_response(f"group_practice_{practice.id}_progress.csv", progress_csv_rows(build_group_problem_progress(db, members, problem_ids, practice_id=practice.id)))
 
@@ -4818,7 +6663,7 @@ def group_contest_progress_page(group_contest_id: int, request: Request, db: Ses
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).all()
+    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).join(User, User.id == GroupMember.user_id).filter(User.is_deleted == False, User.is_admin == False).all()
     links = db.query(ContestProblem).filter(ContestProblem.contest_id == group_contest.contest_id).order_by(ContestProblem.order_index.asc(), ContestProblem.problem_id.asc()).all()
     progress_rows = build_group_problem_progress(db, members, [link.problem_id for link in links], contest_id=group_contest.contest_id)
     return templates.TemplateResponse("group_contest_progress.html", {"request": request, "user": user, "group": group, "group_contest": group_contest, "contest": group_contest.contest, "progress_rows": progress_rows})
@@ -4834,7 +6679,7 @@ def export_group_contest_progress_csv(group_contest_id: int, request: Request, d
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).all()
+    members = db.query(GroupMember).filter(GroupMember.group_id == group.id).join(User, User.id == GroupMember.user_id).filter(User.is_deleted == False, User.is_admin == False).all()
     problem_ids = [link.problem_id for link in db.query(ContestProblem).filter(ContestProblem.contest_id == group_contest.contest_id).order_by(ContestProblem.order_index.asc(), ContestProblem.problem_id.asc()).all()]
     return csv_response(f"group_contest_{group_contest.id}_progress.csv", progress_csv_rows(build_group_problem_progress(db, members, problem_ids, contest_id=group_contest.contest_id)))
 
@@ -4851,7 +6696,7 @@ def export_submissions_csv(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
     rows = [["id", "username", "problem_id", "contest_id", "language", "result", "runtime_ms", "memory_kb", "created_at"]]
     for s in db.query(Submission).order_by(Submission.id.asc()).all():
-        rows.append([s.id, s.user.username if s.user else "", s.problem_id, s.contest_id or "", s.language, s.result, s.runtime_ms, s.memory_kb, s.created_at])
+        rows.append([s.id, csv_display_username(s.user) if s.user else "", s.problem_id, s.contest_id or "", s.language, s.result, s.runtime_ms, s.memory_kb, s.created_at])
     return csv_response("submissions.csv", rows)
 
 
@@ -4862,10 +6707,7 @@ def export_contest_ranking_csv(contest_id: int, request: Request, db: Session = 
     if contest is None:
         raise HTTPException(status_code=404, detail="Contest not found")
     require_contest_manager(user, contest, db)
-    rows = [["rank", "username", "solved_count", "wrong_count", "runtime_ms", "memory_kb"]]
-    for row in build_contest_rankings(db, contest):
-        rows.append([row["rank"], row["user"].username if row["user"] else "", row["solved_count"], row["wrong_count"], row["runtime_ms"], row["memory_kb"]])
-    return csv_response(f"contest_{contest.id}_ranking.csv", rows)
+    return csv_response(f"contest_{contest.id}_ranking.csv", build_contest_score_rows(db, contest))
 
 
 @app.get("/admin/contests/{contest_id}/submissions.csv")
@@ -4878,7 +6720,7 @@ def export_contest_submissions_csv(contest_id: int, request: Request, db: Sessio
     rows = [["id", "username", "problem_id", "label", "language", "result", "runtime_ms", "memory_kb", "created_at"]]
     for s in db.query(Submission).filter(Submission.contest_id == contest.id).order_by(Submission.id.asc()).all():
         link = get_contest_link_for_submission(db, s)
-        rows.append([s.id, s.user.username if s.user else "", s.problem_id, link.label if link else "", s.language, s.result, s.runtime_ms, s.memory_kb, s.created_at])
+        rows.append([s.id, csv_display_username(s.user) if s.user else "", s.problem_id, link.label if link else "", s.language, s.result, s.runtime_ms, s.memory_kb, s.created_at])
     return csv_response(f"contest_{contest.id}_submissions.csv", rows)
 
 
@@ -4926,10 +6768,7 @@ def export_group_contest_ranking_csv(group_contest_id: int, request: Request, db
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    rows = [["rank", "username", "solved_count", "wrong_count", "runtime_ms", "memory_kb"]]
-    for row in build_contest_rankings(db, group_contest.contest):
-        rows.append([row["rank"], row["user"].username if row["user"] else "", row["solved_count"], row["wrong_count"], row["runtime_ms"], row["memory_kb"]])
-    return csv_response(f"group_contest_{group_contest.id}_ranking.csv", rows)
+    return csv_response(f"group_contest_{group_contest.id}_ranking.csv", build_contest_score_rows(db, group_contest.contest))
 
 
 @app.get("/admin/group-contests/{group_contest_id}/scores", response_class=HTMLResponse)
@@ -4985,15 +6824,109 @@ def export_group_practice_board_csv(practice_id: int, request: Request, db: Sess
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     require_group_owner_or_admin(user, group)
-    members = db.query(GroupMember).filter(GroupMember.group_id == practice.group_id).order_by(GroupMember.user_id.asc()).all()
+    members = db.query(GroupMember).filter(GroupMember.group_id == practice.group_id).join(User, User.id == GroupMember.user_id).filter(User.is_deleted == False, User.is_admin == False).order_by(GroupMember.user_id.asc()).all()
     items = db.query(GroupPracticeProblem).filter(GroupPracticeProblem.practice_id == practice.id).order_by(GroupPracticeProblem.order_index.asc(), GroupPracticeProblem.id.asc()).all()
     board = build_practice_board(db, practice, members, items)
     header = ["username", "solved_count"] + [str(item.problem_id) for item in items]
     rows = [header]
     for row in board:
-        rows.append([row["user"].username if row["user"] else "", row["solved_count"]] + [f"AC/{cell['attempts']}" if cell["solved"] else (f"TRY/{cell['attempts']}" if cell["attempts"] else "") for cell in row["cells"]])
+        rows.append([csv_display_username(row["user"]) if row["user"] else "", row["solved_count"]] + [f"AC/{cell['attempts']}" if cell["solved"] else (f"TRY/{cell['attempts']}" if cell["attempts"] else "") for cell in row["cells"]])
     return csv_response(f"group_practice_{practice.id}_board.csv", rows)
 
+
+
+
+@app.get("/admin/profile-assets", response_class=HTMLResponse)
+def admin_profile_assets_page(request: Request, message: str = "", error: str = "", db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    assets = db.query(ProfileAsset).order_by(ProfileAsset.asset_type.asc(), ProfileAsset.id.desc()).all()
+    return templates.TemplateResponse("admin_profile_assets.html", {"request": request, "user": user, "assets": assets, "message": message, "error": error})
+
+
+@app.post("/admin/profile-assets")
+def admin_create_profile_asset(
+    request: Request,
+    asset_type: str = Form("badge"),
+    title: str = Form(...),
+    description: str = Form(""),
+    image_file: UploadFile | None = File(None),
+    icon_text: str = Form(""),
+    condition_type: str = Form("single"),
+    condition_problem_ids: str = Form(""),
+    condition_value: str = Form(""),
+    is_default: str | None = Form(None),
+    is_active: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = require_admin(request, db)
+    asset_type = asset_type if asset_type in {"badge", "background"} else "badge"
+    condition_type = condition_type if condition_type in {"single", "all", "any", "default", "period_solve", "streak", "tag_rating"} else "single"
+    asset = ProfileAsset(
+        asset_type=asset_type,
+        title=title.strip(),
+        description=description.strip(),
+        image_url=save_profile_asset_upload(image_file),
+        icon_text=icon_text.strip(),
+        condition_type=condition_type,
+        condition_problem_ids=condition_problem_ids.strip(),
+        condition_value=condition_value.strip(),
+        is_default=bool(is_default) or condition_type == "default",
+        is_active=bool(is_active),
+    )
+    db.add(asset)
+    db.commit()
+    audit_log(db, request, user, "profile_asset_create", "profile_asset", asset.id, f"프로필 {asset_type} 생성: {asset.title}")
+    return RedirectResponse("/admin/profile-assets?message=프로필 보상을 추가했습니다.", status_code=303)
+
+
+@app.post("/admin/profile-assets/{asset_id}/edit")
+def admin_edit_profile_asset(
+    asset_id: int,
+    request: Request,
+    asset_type: str = Form("badge"),
+    title: str = Form(...),
+    description: str = Form(""),
+    image_file: UploadFile | None = File(None),
+    icon_text: str = Form(""),
+    condition_type: str = Form("single"),
+    condition_problem_ids: str = Form(""),
+    condition_value: str = Form(""),
+    is_default: str | None = Form(None),
+    is_active: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = require_admin(request, db)
+    asset = db.query(ProfileAsset).filter(ProfileAsset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="프로필 보상을 찾을 수 없습니다.")
+    asset.asset_type = asset_type if asset_type in {"badge", "background"} else "badge"
+    asset.title = title.strip()
+    asset.description = description.strip()
+    new_image_path = save_profile_asset_upload(image_file)
+    if new_image_path:
+        asset.image_url = new_image_path
+    asset.icon_text = icon_text.strip()
+    asset.condition_type = condition_type if condition_type in {"single", "all", "any", "default", "period_solve", "streak", "tag_rating"} else "single"
+    asset.condition_problem_ids = condition_problem_ids.strip()
+    asset.condition_value = condition_value.strip()
+    asset.is_default = bool(is_default) or asset.condition_type == "default"
+    asset.is_active = bool(is_active)
+    db.commit()
+    audit_log(db, request, user, "profile_asset_update", "profile_asset", asset.id, f"프로필 보상 수정: {asset.title}")
+    return RedirectResponse("/admin/profile-assets?message=프로필 보상을 수정했습니다.", status_code=303)
+
+
+@app.post("/admin/profile-assets/{asset_id}/delete")
+def admin_delete_profile_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    asset = db.query(ProfileAsset).filter(ProfileAsset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="프로필 보상을 찾을 수 없습니다.")
+    title = asset.title
+    db.delete(asset)
+    db.commit()
+    audit_log(db, request, user, "profile_asset_delete", "profile_asset", asset_id, f"프로필 보상 삭제: {title}")
+    return RedirectResponse("/admin/profile-assets?message=프로필 보상을 삭제했습니다.", status_code=303)
 
 @app.get("/users/{username}", response_class=HTMLResponse)
 def user_profile(username: str, request: Request, db: Session = Depends(get_db)):
@@ -5001,39 +6934,71 @@ def user_profile(username: str, request: Request, db: Session = Depends(get_db))
     target = db.query(User).filter(User.username == username).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    submissions = db.query(Submission).filter(Submission.user_id == target.id, Submission.contest_id.is_(None)).order_by(Submission.id.desc()).all()
-    solved_ids = sorted({s.problem_id for s in submissions if s.result == "AC"})
-    tried_ids = sorted({s.problem_id for s in submissions})
-    wrong_count = sum(1 for s in submissions if s.result not in {"AC", "JUDGING", "WAITING"})
-    ac_count = sum(1 for s in submissions if s.result == "AC")
-    tried_only_ids = sorted(set(tried_ids) - set(solved_ids))
-    result_rows = db.query(Submission.result, func.count(Submission.id)).filter(Submission.user_id == target.id).group_by(Submission.result).all()
-    recent = submissions[:10]
-    return templates.TemplateResponse("user_profile.html", {
-        "request": request,
-        "user": viewer,
-        "target": target,
-        "solved_ids": solved_ids,
-        "tried_ids": tried_ids,
-        "tried_only_ids": tried_only_ids,
-        "wrong_count": wrong_count,
-        "ac_count": ac_count,
-        "result_rows": result_rows,
-        "recent": recent,
-    })
+    return templates.TemplateResponse("user_profile.html", build_user_profile_context(db, request, viewer, target))
 
 
-@app.post("/users/{username}/profile-background")
-def update_profile_background(username: str, request: Request, profile_background_url: str = Form(""), db: Session = Depends(get_db)):
+@app.post("/users/{username}/profile/edit")
+def edit_user_profile(
+    username: str,
+    request: Request,
+    profile_message: str = Form(""),
+    selected_profile_badge_id: int = Form(0),
+    selected_profile_background_id: int = Form(0),
+    profile_image: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
     user = require_login(request, db)
     target = db.query(User).filter(User.username == username).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if not (user.is_admin or user.id == target.id):
-        raise HTTPException(status_code=403, detail="본인 또는 관리자만 수정할 수 있습니다.")
-    target.profile_background_url = profile_background_url.strip()[:500]
+    if user.id != target.id and not user.is_admin:
+        raise HTTPException(status_code=403, detail="프로필을 수정할 권한이 없습니다.")
+    target.profile_message = profile_message.strip()[:256]
+    if profile_image and profile_image.filename:
+        target.profile_image_url = save_user_profile_upload(profile_image, "avatar")
+    solved_ids = {row[0] for row in db.query(Submission.problem_id).filter(Submission.user_id == target.id, Submission.result == "AC").all()}
+    solved_dates = {}
+    for submission in db.query(Submission).filter(Submission.user_id == target.id, Submission.result == "AC").all():
+        if submission.created_at:
+            key = streak_day_key(submission.created_at)
+            solved_dates[key] = solved_dates.get(key, 0) + 1
+    today_key_dt = (datetime.now(APP_TIMEZONE) - timedelta(hours=6)).date()
+    longest_for_asset = 0
+    current_run_for_asset = 0
+    for i in range(371):
+        day = today_key_dt - timedelta(days=370 - i)
+        if solved_dates.get(day.isoformat(), 0) > 0:
+            current_run_for_asset += 1
+            longest_for_asset = max(longest_for_asset, current_run_for_asset)
+        else:
+            current_run_for_asset = 0
+    solved_problems_for_asset = db.query(Problem).filter(Problem.id.in_(solved_ids)).all() if solved_ids else []
+    tag_rating_for_asset = {}
+    for tag in active_algorithm_tags(db):
+        values = [max(0, min(30, int(problem.tier or 0))) for problem in solved_problems_for_asset if tag.key in problem_tag_keys(problem)]
+        if values:
+            tag_rating_for_asset[tag.key] = sum(sorted(values, reverse=True)[:100]) + rating_solved_count_bonus(len(values))
+    if selected_profile_badge_id:
+        badge = db.query(ProfileAsset).filter(ProfileAsset.id == selected_profile_badge_id, ProfileAsset.asset_type == "badge", ProfileAsset.is_active == True).first()  # noqa: E712
+        if badge and profile_asset_earned(badge, solved_ids, solved_dates=solved_dates, longest_streak=longest_for_asset, tag_ratings=tag_rating_for_asset):
+            target.selected_profile_badge_id = badge.id
+        else:
+            target.selected_profile_badge_id = 0
+    else:
+        target.selected_profile_badge_id = 0
+    if selected_profile_background_id:
+        background = db.query(ProfileAsset).filter(ProfileAsset.id == selected_profile_background_id, ProfileAsset.asset_type == "background", ProfileAsset.is_active == True).first()  # noqa: E712
+        if background and profile_asset_earned(background, solved_ids, solved_dates=solved_dates, longest_streak=longest_for_asset, tag_ratings=tag_rating_for_asset):
+            target.selected_profile_background_id = background.id
+            target.profile_background_url = ""
+        else:
+            target.selected_profile_background_id = 0
+    else:
+        target.selected_profile_background_id = 0
     db.commit()
-    return RedirectResponse(url=f"/users/{target.username}", status_code=303)
+    return RedirectResponse(f"/users/{target.username}?message=프로필을 수정했습니다.", status_code=303)
+
+
 
 @app.post("/users/{username}/delete")
 def delete_my_account(username: str, request: Request, password: str = Form(...), confirm_text: str = Form(...), db: Session = Depends(get_db)):
@@ -5046,11 +7011,7 @@ def delete_my_account(username: str, request: Request, password: str = Form(...)
     if target.is_admin and db.query(User).filter(User.is_admin == True, User.id != target.id).count() == 0:  # noqa: E712
         raise HTTPException(status_code=400, detail="마지막 관리자 계정은 탈퇴할 수 없습니다.")
     if confirm_text.strip() != "탈퇴하겠습니다.":
-        return templates.TemplateResponse("user_profile.html", {
-            "request": request, "user": user, "target": target, "solved_ids": [], "tried_ids": [], "tried_only_ids": [],
-            "wrong_count": 0, "ac_count": 0, "result_rows": [], "recent": [],
-            "delete_error": "확인 문구를 정확히 입력해야 합니다. 문구: 탈퇴하겠습니다."
-        })
+        return templates.TemplateResponse("user_profile.html", build_user_profile_context(db, request, user, target, delete_error="확인 문구를 정확히 입력해야 합니다. 문구: 탈퇴하겠습니다."))
     if not verify_password(password, target.password_hash):
         raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다.")
     audit_log(db, request, user, "delete_account", "user", target.id, f"사용자 탈퇴: {target.username}")
@@ -5084,8 +7045,9 @@ def admin_update_user_profile(user_id: int, request: Request, full_name: str = F
 
 
 @app.post("/admin/users/{user_id}/reset-password")
-def admin_reset_user_password(user_id: int, request: Request, new_password: str = Form(...), db: Session = Depends(get_db)):
+def admin_reset_user_password(user_id: int, request: Request, new_password: str = Form(...), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     admin = require_admin(request, db)
+    require_confirm_text(confirm_text, "reset_password")
     target = db.query(User).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -5131,8 +7093,9 @@ def parse_user_bulk_csv(csv_text: str) -> list[dict]:
 
 
 @app.post("/admin/users/bulk-create")
-def admin_bulk_create_users(request: Request, csv_text: str = Form(""), csv_file: UploadFile | None = File(None), db: Session = Depends(get_db)):
+def admin_bulk_create_users(request: Request, csv_text: str = Form(""), csv_file: UploadFile | None = File(None), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     user = require_admin(request, db)
+    require_confirm_text(confirm_text, "bulk_create")
     created = 0
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
@@ -5156,7 +7119,7 @@ def admin_bulk_update_user_profiles(request: Request, csv_text: str = Form(""), 
     skipped = 0
     for row in parse_user_bulk_csv(read_csv_text(csv_text, csv_file)):
         target = db.query(User).filter(User.username == row["username"]).first()
-        if target is None:
+        if target is None or getattr(target, "is_deleted", False):
             skipped += 1
             continue
         target.full_name = row["full_name"]
@@ -5168,8 +7131,9 @@ def admin_bulk_update_user_profiles(request: Request, csv_text: str = Form(""), 
 
 
 @app.post("/admin/users/bulk-reset-password")
-def admin_bulk_reset_user_passwords(request: Request, user_ids: list[int] = Form([]), new_password: str = Form("changeme1234"), db: Session = Depends(get_db)):
+def admin_bulk_reset_user_passwords(request: Request, user_ids: list[int] = Form([]), new_password: str = Form("changeme1234"), confirm_text: str = Form(""), db: Session = Depends(get_db)):
     admin = require_admin(request, db)
+    require_confirm_text(confirm_text, "bulk_reset")
     password_error = validate_password_value(new_password)
     if password_error:
         raise HTTPException(status_code=400, detail=password_error)
@@ -5177,7 +7141,7 @@ def admin_bulk_reset_user_passwords(request: Request, user_ids: list[int] = Form
         if user_id == admin.id:
             continue
         target = db.query(User).filter(User.id == user_id).first()
-        if target:
+        if target and not getattr(target, "is_deleted", False):
             target.password_hash = hash_password(new_password)
             target.must_change_password = True
             create_message(db, target.id, "비밀번호 초기화", "관리자가 비밀번호를 초기화했습니다. 로그인 후 비밀번호를 변경해 주세요.", "notice")

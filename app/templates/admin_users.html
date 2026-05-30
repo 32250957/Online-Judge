@@ -28,7 +28,7 @@
     <details>
         <summary>CSV로 계정 일괄 생성</summary>
         <p class="hint">첫 줄은 username,password,full_name,student_id 형식입니다. 이미 존재하는 아이디는 건너뜁니다.</p>
-        <form action="/admin/users/bulk-create" method="post" enctype="multipart/form-data">
+        <form action="/admin/users/bulk-create" method="post" enctype="multipart/form-data" onsubmit="return confirmDanger(this, '일괄 생성하겠습니다', 'CSV 내용대로 계정을 일괄 생성합니다.');">
             <input type="file" name="csv_file" accept=".csv,text/csv">
             <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
             <textarea name="csv_text" class="short-code-textarea" placeholder="username,password,full_name,student_id\nstudent01,1234,홍길동,10101"></textarea>
@@ -52,7 +52,7 @@
     <button type="button" onclick="selectFilteredUsers(false)">필터 결과 선택 해제</button>
     <span class="hint" id="userFilterCount"></span>
     <input type="text" name="new_password" form="adminBulkUserForm" value="changeme1234" minlength="8" maxlength="20" placeholder="초기화 비밀번호">
-    <button type="submit" form="adminBulkUserForm" formaction="/admin/users/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
+    <button type="submit" form="adminBulkUserForm" formaction="/admin/users/bulk-reset-password" onclick="return confirmDanger(document.getElementById('adminBulkUserForm'), '일괄 초기화하겠습니다', '선택한 회원의 비밀번호를 초기화합니다.');">선택 비밀번호 초기화</button>
 </div>
 <table>
     <thead><tr><th>선택</th><th>ID</th><th>아이디</th><th>상태</th><th>이름/학번</th><th>관리자</th><th>비번 변경</th><th>제출 제한</th><th>관리자 변경</th><th>관리</th></tr></thead>
@@ -92,7 +92,7 @@
                         <button type="submit">초 단위 제출 제한</button>
                     </form>
                     <form action="/admin/users/{{ item.id }}/unban-submit" method="post"><button type="submit">제한 해제</button></form>
-                    <form action="/admin/users/{{ item.id }}/reset-password" method="post" class="inline-form stacked-inline-form" onsubmit="return confirm('이 사용자의 비밀번호를 초기화할까요?');">
+                    <form action="/admin/users/{{ item.id }}/reset-password" method="post" class="inline-form stacked-inline-form" onsubmit="return confirmDanger(this, '초기화하겠습니다', '이 사용자의 비밀번호를 초기화합니다.');">
                         <input type="text" name="new_password" minlength="8" maxlength="20" placeholder="새 비밀번호" required>
                         <button type="submit">비밀번호 초기화</button>
                     </form>

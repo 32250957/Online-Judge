@@ -1,12 +1,61 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>백업 / 데이터 보존</h2>
+<h2>백업 / 복구</h2>
+
+{% if message %}<div class="success-box">{{ message }}</div>{% endif %}
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
 <section class="box">
-    <p class="hint">현재 DB 주요 테이블과 problems/uploads 파일을 ZIP으로 묶어 다운로드합니다.</p>
-    <p class="hint">이 백업은 보존 및 수동 복구용입니다. 자동 복원 기능은 아직 제공하지 않습니다.</p>
-    <a class="button" href="/admin/backups/download">전체 백업 ZIP 다운로드</a>
+    <h3>즉시 백업</h3>
+    <p class="hint">현재 DB 주요 테이블과 <code>problems/</code>, <code>uploads/</code> 파일을 ZIP으로 묶습니다.</p>
+    <a class="button" href="/admin/backups/download">백업 ZIP 바로 다운로드</a>
+    <form method="post" action="/admin/backups/create" style="display:inline-block; margin-left:8px;">
+        <button type="submit">서버에 백업 저장</button>
+    </form>
     <a class="button" href="/admin/diagnostics">시스템 점검으로 이동</a>
 </section>
+
+<section class="box">
+    <h3>저장된 백업</h3>
+    {% if backups %}
+    <table class="backup-count-table">
+        <thead>
+            <tr><th>파일명</th><th>크기</th><th>생성/수정 시각</th><th>다운로드</th></tr>
+        </thead>
+        <tbody>
+        {% for backup in backups %}
+            <tr>
+                <td><code>{{ backup.name }}</code></td>
+                <td>{{ backup.size_mb }} MB</td>
+                <td>{{ backup.modified_at }}</td>
+                <td><a class="button small" href="/admin/backups/files/{{ backup.name }}">다운로드</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+        <p class="hint">아직 서버에 저장된 백업이 없습니다.</p>
+    {% endif %}
+</section>
+
+<section class="box danger-zone">
+    <h3>백업 복구</h3>
+    <p class="error-box">주의: 복구를 실행하면 현재 DB와 problems/uploads 파일이 백업 시점으로 교체됩니다.</p>
+    <p class="hint">복구 직전 현재 상태는 <code>backups/</code> 폴더에 안전 백업으로 자동 저장됩니다.</p>
+    <form method="post" action="/admin/backups/restore" enctype="multipart/form-data" class="danger-form">
+        <div>
+            <label>복구할 백업 ZIP</label>
+            <input type="file" name="backup_file" accept=".zip" required>
+        </div>
+        <div>
+            <label>확인 문구</label>
+            <input type="text" name="confirm_text" placeholder="{{ restore_confirm_text }}" required>
+            <p class="hint"><code>{{ restore_confirm_text }}</code> 라고 입력해야 복구됩니다.</p>
+        </div>
+        <button type="submit" class="danger-button">백업 복구 실행</button>
+    </form>
+</section>
+
 <section class="box">
     <h3>백업 대상 요약</h3>
     <table class="backup-count-table">
@@ -21,5 +70,15 @@
             <tr><td>현재 점검 경고</td><td>{{ counts.warnings }}</td></tr>
         </tbody>
     </table>
+</section>
+
+<section class="box">
+    <h3>권장 운영 절차</h3>
+    <ol>
+        <li>패치 적용 전 백업 ZIP을 다운로드하고, 서버에도 한 번 저장합니다.</li>
+        <li>큰 작업 전에는 <code>서버에 백업 저장</code>을 먼저 누릅니다.</li>
+        <li>복구 후에는 다시 로그인하고 <a href="/admin/diagnostics">시스템 점검</a>에서 경고가 늘어나지 않았는지 확인합니다.</li>
+    </ol>
+    <p class="hint">별도 DB 덤프도 병행하면 더 안전합니다: <code>docker compose exec db pg_dump -U postgres online_judge &gt; backup.sql</code></p>
 </section>
 {% endblock %}

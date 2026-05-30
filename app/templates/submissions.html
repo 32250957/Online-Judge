@@ -20,22 +20,6 @@
         </select>
     </div>
     <div>
-        <label>결과</label>
-        <select name="result">
-            <option value="">전체</option>
-            {% for r in result_options %}<option value="{{ r }}" {% if filters and filters.result == r %}selected{% endif %}>{{ result_label(r) }}</option>{% endfor %}
-        </select>
-    </div>
-    <div>
-        <label>범위</label>
-        <select name="contest_scope">
-            <option value="" {% if not filters or not filters.contest_scope %}selected{% endif %}>전체</option>
-            <option value="normal" {% if filters and filters.contest_scope == 'normal' %}selected{% endif %}>일반 제출</option>
-            <option value="contest" {% if filters and filters.contest_scope == 'contest' %}selected{% endif %}>대회 제출</option>
-            <option value="practice" {% if filters and filters.contest_scope == 'practice' %}selected{% endif %}>그룹 연습 제출</option>
-        </select>
-    </div>
-    <div>
         <label>페이지 크기</label>
         <select name="per_page">
             {% for size in [25, 50, 100, 200] %}<option value="{{ size }}" {% if filters and filters.per_page == size %}selected{% endif %}>{{ size }}개</option>{% endfor %}
@@ -57,7 +41,7 @@
         {% for s in submissions %}
         <tr data-submission-id="{{ s.id }}" data-live="{{ 1 if s.judge_status not in ['DONE', 'FAILED'] else 0 }}">
             <td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td>
-            <td>{{ display_username(s.user) }}</td>
+            <td>{% if s.user and not s.user.is_deleted %}<a class="username-link" href="/users/{{ s.user.username }}">{{ display_username(s.user) }}</a>{% else %}{{ display_username(s.user) }}{% endif %}</td>
             <td>
                 {% if s.contest_id %}
                     {% set link = get_contest_link(s) %}
@@ -71,8 +55,8 @@
             <td class="result-cell result {{ s.result }}" data-result-code="{{ s.result }}">{{ result_label(s.result) }}</td>
             <td><span class="runtime-ms">{{ s.runtime_ms }}</span> ms</td>
             <td><span class="memory-kb">{{ s.memory_kb }}</span> KB</td>
-            <td>{{ s.created_at }}</td>
-            {% if user and user.is_admin %}<td><form action="/admin/submissions/{{ s.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 제출 기록을 삭제할까요?');"><button type="submit" class="danger">삭제</button></form></td>{% endif %}
+            <td>{{ s.created_at|kst_time }}</td>
+            {% if user and user.is_admin %}<td><form action="/admin/submissions/{{ s.id }}/delete" method="post" class="inline-actions" onsubmit="return confirmDanger(this, '제출을 삭제하겠습니다', '이 제출 기록을 삭제합니다.');"><button type="submit" class="danger">삭제</button></form></td>{% endif %}
         </tr>
         {% endfor %}
     </tbody>

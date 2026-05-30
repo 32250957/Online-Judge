@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from app.database import SessionLocal
 from app.models import Submission, Problem, JudgeJob, JudgeLog
-from app.judge import judge_code, normalize_language, SUPPORTED_LANGUAGES
+from app.judge import judge_code, normalize_language, SUPPORTED_LANGUAGES, effective_time_limit_for_language
 
 POLL_INTERVAL = float(os.getenv("OJ_WORKER_POLL_INTERVAL", "1"))
 HEARTBEAT_INTERVAL = float(os.getenv("OJ_WORKER_HEARTBEAT_INTERVAL", "30"))
@@ -21,11 +21,18 @@ def _allowed_languages(raw: str | None) -> set[str]:
     return values or {"python"}
 
 WORKER_NAME = os.getenv("OJ_WORKER_NAME", "worker")
+WORKER_JOB_TYPES = {token.strip() for token in os.getenv("OJ_WORKER_JOB_TYPES", "judge,rejudge").split(",") if token.strip()}
+if not WORKER_JOB_TYPES:
+    WORKER_JOB_TYPES = {"judge", "rejudge"}
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def add_log(db, submission_id: int | None, event: str, message: str) -> None:
     try:
-        db.add(JudgeLog(submission_id=submission_id, worker_name=WORKER_NAME, event=event, message=message[:4000]))
+        db.add(JudgeLog(submission_id=submission_id, worker_name=WORKER_NAME, event=event, message=message[:4000], created_at=utc_now()))
         db.commit()
     except Exception:
         db.rollback()
@@ -36,6 +43,7 @@ def validate_problem_testcases(problem_id: int) -> tuple[bool, str]:
     if not os.path.isdir(tests_dir):
         return False, "테스트 케이스 폴더를 찾을 수 없습니다."
     input_files = sorted([name for name in os.listdir(tests_dir) if name.endswith(".in")])
+    output_files = sorted([name for name in os.listdir(tests_dir) if name.endswith(".out")])
     if not input_files:
         return False, "테스트 케이스 입력 파일이 없습니다."
     missing = []
@@ -45,6 +53,10 @@ def validate_problem_testcases(problem_id: int) -> tuple[bool, str]:
             missing.append(out_name)
     if missing:
         return False, "출력 파일 누락: " + ", ".join(missing[:10])
+    input_stems = {name[:-3] for name in input_files}
+    orphan_outputs = [name for name in output_files if name[:-4] not in input_stems]
+    if orphan_outputs:
+        return False, "입력 파일 없이 출력 파일만 존재: " + ", ".join(orphan_outputs[:10])
     return True, f"테스트 케이스 {len(input_files)}개 확인"
 
 
@@ -61,7 +73,9 @@ def _claim_next_job(db) -> JudgeJob | None:
         .all()
     )
     for submission in orphan:
-        db.add(JudgeJob(submission_id=submission.id, job_type="judge", status="QUEUED"))
+        problem = submission.problem or db.query(Problem).filter(Problem.id == submission.problem_id).first()
+        priority = int(getattr(problem, "judge_priority", 0) or 0)
+        db.add(JudgeJob(submission_id=submission.id, job_type="judge", status="QUEUED", priority=priority, created_at=utc_now()))
     if orphan:
         db.commit()
 
@@ -69,6 +83,7 @@ def _claim_next_job(db) -> JudgeJob | None:
         job_row = (
             db.query(JudgeJob.id)
             .filter(JudgeJob.status == "QUEUED")
+            .filter(JudgeJob.job_type.in_(WORKER_JOB_TYPES))
             .order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
             .with_for_update(skip_locked=True)
             .first()
@@ -78,6 +93,7 @@ def _claim_next_job(db) -> JudgeJob | None:
         job_row = (
             db.query(JudgeJob.id)
             .filter(JudgeJob.status == "QUEUED")
+            .filter(JudgeJob.job_type.in_(WORKER_JOB_TYPES))
             .order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
             .first()
         )
@@ -89,7 +105,7 @@ def _claim_next_job(db) -> JudgeJob | None:
     job.status = "RUNNING"
     job.worker_name = WORKER_NAME
     job.attempts = (job.attempts or 0) + 1
-    job.started_at = datetime.utcnow()
+    job.started_at = utc_now()
     db.commit()
     db.refresh(job)
     return job
@@ -97,7 +113,7 @@ def _claim_next_job(db) -> JudgeJob | None:
 
 def _finish_job(job: JudgeJob, status: str, error_message: str = "") -> None:
     job.status = status
-    job.finished_at = datetime.utcnow()
+    job.finished_at = utc_now()
     job.error_message = (error_message or "")[:4000]
 
 
@@ -154,11 +170,20 @@ def judge_one(db) -> bool:
                 add_log(db, submission.id, "finish", f"{submission.result} / {submission.judge_status} / testcase validation failed")
                 return True
             add_log(db, submission.id, "start", f"job={job.id}, type={job.job_type}, problem={problem.id}, language={submission.language}, {test_message}")
+            language = normalize_language(submission.language)
+            effective_time_limit = effective_time_limit_for_language(
+                problem.time_limit,
+                language,
+                getattr(problem, "python_time_limit", None),
+                getattr(problem, "c_time_limit", None),
+                getattr(problem, "cpp_time_limit", None),
+                getattr(problem, "java_time_limit", None),
+            )
             result, detail, runtime_ms, memory_kb = judge_code(
                 problem.id,
                 submission.code,
-                normalize_language(submission.language),
-                problem.time_limit,
+                language,
+                effective_time_limit,
                 problem.memory_limit,
             )
             submission.result = result
@@ -183,14 +208,14 @@ def judge_one(db) -> bool:
     return True
 
 def main() -> None:
-    print(f"[{WORKER_NAME}] judge worker started", flush=True)
+    print(f"[{WORKER_NAME}] judge worker started (job_types={','.join(sorted(WORKER_JOB_TYPES))})", flush=True)
     last_heartbeat = 0.0
     while True:
         db = SessionLocal()
         try:
             now_ts = time.time()
             if now_ts - last_heartbeat >= HEARTBEAT_INTERVAL:
-                add_log(db, None, "heartbeat", "worker alive")
+                add_log(db, None, "heartbeat", f"worker alive / job_types={','.join(sorted(WORKER_JOB_TYPES))}")
                 last_heartbeat = now_ts
             worked = judge_one(db)
         except Exception:

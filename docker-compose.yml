@@ -74,6 +74,7 @@ services:
       OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
       OJ_WORKER_NAME: worker-1
+      OJ_WORKER_JOB_TYPES: judge
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./problems:/app/problems
@@ -94,6 +95,7 @@ services:
       OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
       OJ_WORKER_NAME: worker-2
+      OJ_WORKER_JOB_TYPES: judge
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./problems:/app/problems
@@ -114,6 +116,28 @@ services:
       OJ_CPP_IMAGE: oj-gcc:13
       OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
       OJ_WORKER_NAME: worker-3
+      OJ_WORKER_JOB_TYPES: judge
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./problems:/app/problems
+      - ./uploads:/app/uploads
+      - ./judge_work:/tmp/oj_judge_work
+    command: python worker.py
+
+  rejudge-worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      judge-images:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      OJ_PYTHON_IMAGE: python:3.11-slim
+      OJ_C_IMAGE: oj-gcc:13
+      OJ_CPP_IMAGE: oj-gcc:13
+      OJ_JUDGE_WORK_ROOT: /tmp/oj_judge_work
+      OJ_WORKER_NAME: rejudge-worker-1
+      OJ_WORKER_JOB_TYPES: rejudge
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./problems:/app/problems

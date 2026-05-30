@@ -12,10 +12,10 @@
     <p><b>메모리:</b> <span id="memory-kb">{{ submission.memory_kb }}</span> KB</p>
     <p><b>코드 공개 설정:</b> {% if submission.contest_id %}대회 제출 비공개{% elif submission.problem.force_private_submission %}문제 강제 비공개{% else %}{{ visibility_label(submission.visibility) }}{% endif %}</p>
 {% if user and user.is_admin %}
-<form action="/admin/submissions/{{ submission.id }}/rejudge" method="post" class="inline-actions">
+<form action="/admin/submissions/{{ submission.id }}/rejudge" method="post" class="inline-actions" onsubmit="return confirmDanger(this, '재채점하겠습니다', '이 제출을 재채점 큐에 넣습니다.');">
     <button type="submit">이 제출 재채점</button>
 </form>
-<form action="/admin/submissions/{{ submission.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 제출 기록을 삭제할까요?');">
+<form action="/admin/submissions/{{ submission.id }}/delete" method="post" class="inline-actions" onsubmit="return confirmDanger(this, '제출을 삭제하겠습니다', '이 제출 기록을 삭제합니다.');">
     <button type="submit" class="danger">이 제출 삭제</button>
 </form>
 {% endif %}

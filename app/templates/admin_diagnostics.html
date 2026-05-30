@@ -14,6 +14,22 @@
 </section>
 
 <section class="box">
+    <h3>운영 준비 상태</h3>
+    <table>
+        <tbody>
+            <tr><th>DB 연결</th><td><span class="badge badge-ok">{{ checks.operational_checks.db_connection }}</span></td></tr>
+            <tr><th>problems 폴더</th><td>{% if checks.operational_checks.problems_dir_exists %}<span class="badge badge-ok">존재</span>{% else %}<span class="badge badge-danger">없음</span>{% endif %}</td></tr>
+            <tr><th>Docker CLI</th><td>{% if checks.operational_checks.docker_cli_found %}<span class="badge badge-ok">감지됨</span>{% else %}<span class="badge badge-danger">감지 실패</span>{% endif %}</td></tr>
+            <tr><th>최근 활성 worker</th><td>{{ checks.operational_checks.active_worker_count }}개</td></tr>
+            <tr><th>큐 상태</th><td>대기 {{ checks.operational_checks.queued_jobs }} / 실행 {{ checks.operational_checks.running_jobs }} / 실패 {{ checks.operational_checks.failed_jobs }} / 멈춤 의심 {{ checks.operational_checks.stuck_jobs }}</td></tr>
+            <tr><th>테스트케이스 경고 문제</th><td>{{ checks.operational_checks.problem_file_warning_count }}개</td></tr>
+            <tr><th>탈퇴 계정</th><td>{{ checks.operational_checks.deleted_user_count }}개</td></tr>
+            <tr><th>최근 24시간 제출</th><td>{{ checks.operational_checks.recent_24h_submissions }}건</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="box">
     <h3>DB 스키마 점검</h3>
     <table>
         <thead><tr><th>테이블</th><th>상태</th><th>누락 컬럼</th></tr></thead>
@@ -32,18 +48,20 @@
 <section class="box">
     <h3>문제 파일 / 테스트케이스 점검</h3>
     <table>
-        <thead><tr><th>문제</th><th>입력</th><th>출력</th><th>상태</th><th>내용</th></tr></thead>
+        <thead><tr><th>문제</th><th>입력</th><th>출력</th><th>정상 쌍</th><th>빈 출력</th><th>상태</th><th>내용</th></tr></thead>
         <tbody>
         {% for row in checks.problem_file_rows %}
         <tr>
             <td><a href="/admin/problems/{{ row.problem.id }}/edit">{{ row.problem.id }} - {{ row.problem.title }}</a></td>
             <td>{{ row.input_count }}</td>
             <td>{{ row.output_count }}</td>
+            <td>{{ row.pair_count }}</td>
+            <td>{{ row.empty_output_count }}</td>
             <td><span class="badge {{ 'badge-ok' if row.status == 'OK' else 'badge-warn' }}">{{ row.status }}</span></td>
             <td>{% if row.issues %}{{ row.issues|join(', ') }}{% else %}-{% endif %}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5">등록된 문제가 없습니다.</td></tr>
+        <tr><td colspan="7">등록된 문제가 없습니다.</td></tr>
         {% endfor %}
         </tbody>
     </table>
@@ -69,6 +87,23 @@
     {% else %}
         <p>DB에 없는 문제 폴더가 없습니다.</p>
     {% endif %}
+</section>
+
+
+<section class="box">
+    <h3>권한 정책 요약</h3>
+    <table>
+        <thead><tr><th>기능</th><th>OJ 관리자</th><th>학교 분반 그룹 관리자</th><th>일반 그룹 관리자</th></tr></thead>
+        <tbody>
+            <tr><td>전체 회원 관리</td><td>가능</td><td>불가</td><td>불가</td></tr>
+            <tr><td>그룹 회원 초대/추방</td><td>가능</td><td>소속 그룹 가능</td><td>소속 그룹 가능</td></tr>
+            <tr><td>CSV 일괄 계정 생성/추가</td><td>학교 분반 그룹에서 가능</td><td>승인된 학교 분반 그룹에서 가능</td><td>불가</td></tr>
+            <tr><td>그룹 회원 비밀번호 일괄 초기화</td><td>학교 분반 그룹에서 가능</td><td>승인된 학교 분반 그룹에서 가능</td><td>불가</td></tr>
+            <tr><td>일반 문제 수정</td><td>가능</td><td>불가</td><td>불가</td></tr>
+            <tr><td>그룹 대회 생성 문제 수정</td><td>가능</td><td>소속 그룹 대회 문제 가능</td><td>일반 공개 문제는 불가</td></tr>
+        </tbody>
+    </table>
+    <p class="hint">버튼 숨김뿐 아니라 서버 라우트에서도 권한을 검사합니다. 패치 후에는 일반 그룹 관리자 계정으로 URL 직접 접근도 함께 확인하는 것을 권장합니다.</p>
 </section>
 
 <section class="box">

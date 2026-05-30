@@ -1,84 +1,525 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="profile-hero box" {% if target.profile_background_url %}style="background-image: linear-gradient(rgba(0,0,0,.45), rgba(0,0,0,.45)), url('{{ target.profile_background_url }}');"{% endif %}>
-    <h2>{{ display_username(target) }}님의 프로필</h2>
-    {% if target.full_name or target.student_id %}<p>{% if target.full_name %}<b>이름:</b> {{ target.full_name }} {% endif %}{% if target.student_id %}<b>학번:</b> {{ target.student_id }}{% endif %}</p>{% endif %}
-    <p><b>가입일:</b> {{ target.created_at }}</p>
-    <div class="stats-grid">
-        <div><b>{{ solved_ids|length }}</b><span>푼 문제</span></div>
-        <div><b>{{ tried_ids|length }}</b><span>시도한 문제</span></div>
-        <div><b>{{ tried_only_ids|length }}</b><span>아직 못 푼 문제</span></div>
-        <div><b>{{ ac_count }}</b><span>AC 제출</span></div>
-        <div><b>{{ wrong_count }}</b><span>오답/에러 제출</span></div>
+<section class="profile-v3">
+    <div class="profile-v3-bg-grid" aria-hidden="true"></div>
+
+    <div class="profile-v3-banner">
+        {% if selected_background and selected_background.image %}
+        <img class="profile-v3-banner-image" src="{{ selected_background.image }}" alt="프로필 배경">
+        {% elif target.profile_background_url %}
+        <img class="profile-v3-banner-image" src="{{ target.profile_background_url }}" alt="프로필 배경">
+        {% else %}
+        <div class="profile-v3-banner-art"></div>
+        {% endif %}
+        <div class="profile-v3-banner-overlay"></div>
+    </div>
+
+    <div class="profile-v3-inner">
+        <div class="profile-v3-head">
+            <div class="profile-v3-avatar">
+                {% if target.profile_image_url %}
+                <img src="{{ target.profile_image_url }}" alt="프로필 사진">
+                {% else %}
+                <span>{{ display_username(target)[:1]|upper }}</span>
+                {% endif %}
+            </div>
+
+            <div class="profile-v3-info">
+                <div class="profile-v3-mainline">
+                    <div class="profile-v3-namearea">
+                        <div class="profile-v3-name-badge-line">
+                            <h1>{{ display_username(target) }}</h1>
+                            <span class="profile-v3-equipped-badge {% if not selected_badge %}empty{% endif %}" title="{% if selected_badge %}{{ selected_badge.title }} · {{ selected_badge.description }}{% else %}대표 배지 없음{% endif %}">
+                                {% if selected_badge %}
+                                    {% if selected_badge.image %}<img src="{{ selected_badge.image }}" alt="{{ selected_badge.title }}">{% else %}<b>{{ selected_badge.icon }}</b>{% endif %}
+                                {% else %}
+                                    <b>＋</b>
+                                {% endif %}
+                            </span>
+                        </div>
+                        {% if target.profile_message %}<p class="profile-v3-message">{{ target.profile_message }}</p>{% endif %}
+
+                        <div class="profile-v3-rating-inline">
+                            <span class="tier-text tier-{{ tier_group(rating_summary.tier) }}">{{ rating_summary.tier_name }}</span>
+                            <strong>{{ rating_summary.rating }}</strong>
+                        </div>
+
+                        <div class="profile-v3-progress profile-tier-{{ tier_group(rating_summary.tier) }}">
+                            <span style="width: {{ rating_progress.percent }}%"></span>
+                        </div>
+                        <div class="profile-v3-progress-meta">
+                            {{ rating_progress.next_tier_name }} 승급까지 - {{ rating_progress.remaining }}
+                        </div>
+
+                        <div class="profile-v3-solved-line">
+                            <span>해결한 문제 <b>{{ solved_ids|length }}</b></span>
+                            <span>시도한 문제 <b>{{ tried_ids|length }}</b></span>
+                        </div>
+                    </div>
+
+                    {% if user and (user.id == target.id or user.is_admin) %}
+                    <div class="profile-v3-actions">
+                        <button type="button" class="profile-v3-glass-button" data-profile-edit-open>프로필 편집</button>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <nav class="profile-v3-tabs" data-profile-tabs>
+            <button type="button" data-tab-target="overview" class="active">개요</button>
+            <button type="button" data-tab-target="problems">문제</button>
+            <button type="button" data-tab-target="stats">통계</button>
+            <button type="button" data-tab-target="badges">배지</button>
+            <button type="button" data-tab-target="backgrounds">배경</button>
+            {% if user and (user.id == target.id or user.is_admin) %}<button type="button" data-tab-target="settings">설정</button>{% endif %}
+        </nav>
+
+        <section class="profile-tab-panel active" data-tab-panel="overview">
+            <section class="profile-v3-card profile-v3-rating-card">
+                <div class="profile-v3-card-head">
+                    <div>
+                        <div class="profile-v3-eyebrow"><span></span>RATING</div>
+                        <div class="profile-v3-rating-title">
+                            <span class="tier-text tier-{{ tier_group(rating_summary.tier) }}">{{ rating_summary.tier_name }}</span>
+                            <b>{{ rating_summary.rating }}</b>
+                        </div>
+                    </div>
+                    <div class="profile-v3-rank-stack">
+                        <div class="profile-v3-rank-card">
+                            <b>#{{ user_rank or '-' }}</b>
+                            <span>전체 상위 {{ user_percentile or '-' }}%</span>
+                        </div>
+                        <div class="profile-v3-problem-rating-card">
+                            <span>상위 100문제 난이도 합</span>
+                            <b>{{ rating_summary.problem_rating }}</b>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="profile-v3-rating-subtitle">
+                    <b>상위 100문제의 난이도 합</b>
+                    <span>최근 해결한 일반 문제 기준으로 레이팅이 계산됩니다.</span>
+                </div>
+
+                <div class="profile-v3-rating-grid">
+                    {% for item in rating_problem_tiles %}
+                    <div class="profile-v3-rating-tile tier-mini-{{ item.group }}">{{ item.short }}</div>
+                    {% endfor %}
+                </div>
+
+                <div class="profile-v3-bonus-row">
+                    <div>
+                        <b>해결한 문제 수로 획득한 레이팅</b>
+                        
+                    </div>
+                    <div class="profile-v3-bonus-stats">
+                        <div><span>Solved</span><b>{{ solved_ids|length }}</b></div>
+                        <i></i>
+                        <div><span>Rating</span><b>+{{ rating_summary.solved_bonus }}</b></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="profile-v3-card profile-v3-streak-card">
+                <div class="profile-v3-card-head">
+                    <div>
+                        <div class="profile-v3-icon-title">스트릭</div>
+                        <h3>현재 {{ current_streak }}일</h3>
+                    </div>
+                    <button class="profile-v3-select-button" type="button">최근 ▾</button>
+                </div>
+                <div class="profile-v3-streak-wrap">
+                    <div class="profile-v3-weekdays">
+                        {% for day in ['S','M','T','W','T','F','S'] %}<span>{{ day }}</span>{% endfor %}
+                    </div>
+                    <div class="profile-v3-streak-grid">
+                        {% for day in streak_days %}
+                        <span class="streak-level-{{ day.level }}" title="{{ day.date }} · {{ day.count }}문제"></span>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="profile-v3-months">
+                    {% for month in ['6월','7월','8월','9월','10월','11월','12월','2026','2월','3월','4월','5월'] %}<span>{{ month }}</span>{% endfor %}
+                </div>
+                <div class="profile-v3-streak-footer">
+                    <b>최장 {{ longest_streak }}일 연속 문제 해결</b>
+                    <span>날짜는 매일 오전 6:00 기준으로 변경됩니다.</span>
+                </div>
+            </section>
+
+            <section class="profile-v3-card profile-v3-difficulty-card">
+                <div class="profile-v3-card-head">
+                    <div>
+                        <div class="profile-v3-icon-title">난이도 분포</div>
+                        <h3>{{ solved_ids|length }}문제 해결</h3>
+                    </div>
+                    <button class="profile-v3-select-button" type="button" data-toggle-detail-difficulty>자세히</button>
+                </div>
+                <div class="profile-v3-two-column">
+                    <div class="profile-v3-donut" style="--donut-gradient: {{ difficulty_donut_style }}" aria-hidden="true"></div>
+                    <div>
+                        <div class="profile-v3-table profile-v3-difficulty-simple">
+                            <div class="profile-v3-table-head"><span>레벨</span><span>문제</span><span>비율</span></div>
+                            {% for row in difficulty_rows %}
+                            <div class="profile-v3-table-row">
+                                <span class="tier-text tier-{{ row.name|lower }}">{{ row.name }}</span>
+                                <b>{{ row.count }}</b>
+                                <em>{{ row.percent }}%</em>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="profile-v3-table profile-v3-difficulty-detail" hidden>
+                            <div class="profile-v3-table-head"><span>레벨</span><span>문제</span><span>비율</span></div>
+                            {% for row in difficulty_detail_rows %}
+                            <div class="profile-v3-table-row">
+                                <span class="tier-text tier-{{ row.group }}">{{ row.name }}</span>
+                                <b>{{ row.count }}</b>
+                                <em>{{ row.percent }}</em>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="profile-v3-card profile-v3-tag-card">
+                <div class="profile-v3-icon-title">태그 분포</div>
+                <div class="profile-v3-two-column">
+                    <div class="profile-v3-radar" aria-hidden="true">
+                        <div class="profile-v3-radar-ring r1"></div>
+                        <div class="profile-v3-radar-ring r2"></div>
+                        <div class="profile-v3-radar-ring r3"></div>
+                        <svg viewBox="0 0 300 300" role="img" aria-label="태그 분포">
+                            <line x1="150" y1="30" x2="150" y2="270"></line>
+                            <line x1="30" y1="150" x2="270" y2="150"></line>
+                            <line x1="64" y1="64" x2="236" y2="236"></line>
+                            <line x1="236" y1="64" x2="64" y2="236"></line>
+                            <polygon points="{{ tag_radar_points }}"></polygon>
+                        </svg>
+                        {% for item in radar_labels %}
+                        <span class="radar-label" style="left: {{ item.x }}px; top: {{ item.y }}px;">{{ item.label }}</span>
+                        {% endfor %}
+                    </div>
+                    <div class="profile-v3-table profile-v3-tag-table tag-left-align">
+                        <div class="profile-v3-table-head"><span>태그</span><span>문제</span><span>비율</span><span>레이팅</span></div>
+                        {% for row in tag_rows[:6] %}
+                        <div class="profile-v3-table-row">
+                            <span>#{{ row.tag.name }}</span>
+                            <b>{{ row.count }}</b>
+                            <em>{{ row.percent }}%</em>
+                            <strong>{{ tier_badge(row.tier, small=True) }} {{ row.rating }}</strong>
+                        </div>
+                        {% else %}
+                        <div class="profile-v3-table-row empty"><span>태그 통계가 없습니다.</span></div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </section>
+        </section>
+
+        <section class="profile-tab-panel" data-tab-panel="problems">
+            <section class="profile-v3-list-section">
+                <h2>{{ display_username(target) }}이 해결한 문제</h2>
+                <div class="profile-v3-sort-line" data-profile-sort-controls><b>정렬</b><button type="button" data-sort="id" class="active" data-direction="asc">ID <span class="sort-arrow">↓</span></button><button type="button" data-sort="tier" data-direction="desc">레벨 <span class="sort-arrow"></span></button><button type="button" data-sort="title" data-direction="asc">제목 <span class="sort-arrow"></span></button><button type="button" data-sort="solved" data-direction="desc">푼 사람 수 <span class="sort-arrow"></span></button><button type="button" data-sort="avg" data-direction="desc">평균 시도 <span class="sort-arrow"></span></button><button type="button" data-sort="random">랜덤 <span class="sort-arrow"></span></button></div>
+                {% if solved_problems %}
+                <div class="profile-v3-solved-table">
+                    <div class="profile-v3-solved-head"><span>#</span><span>제목</span><span>푼 사람 수</span><span>평균 시도</span></div>
+                    <div data-solved-row-container>
+                    {% for p in solved_problems %}
+                    <div class="profile-v3-solved-row-wrap" data-problem-row data-id="{{ p.id }}" data-tier="{{ p.tier or 0 }}" data-title="{{ p.title }}" data-solved="{{ p.solved_count or 0 }}" data-avg="{{ p.average_attempts or 0 }}">
+                        <div class="profile-v3-solved-row">
+                            <a class="profile-v3-problem-no" href="/problems/{{ p.id }}"><span class="tier-text tier-{{ tier_group(p.tier) }}">{{ tier_short(p.tier) }}</span><b>{{ p.id }}</b></a>
+                            <a class="profile-v3-problem-title" href="/problems/{{ p.id }}">{{ p.title }}</a>
+                            <span>{{ p.solved_count or '-' }}</span>
+                            <span>{{ p.average_attempts or '-' }}</span>
+                            <button type="button" class="profile-v3-tag-toggle" data-tag-toggle="{{ p.id }}" aria-label="태그 보기"><span class="profile-v3-tag-icon">🏷️</span></button>
+                        </div>
+                        <div class="profile-v3-tag-panel" data-tag-panel="{{ p.id }}" hidden>
+                            <div>
+                            {% set tag_text = solved_problem_tag_map.get(p.id, '-') %}
+                            {% for tag in tag_text.split(', ') %}
+                                {% if tag and tag != '-' %}<span>#{{ tag }}</span>{% endif %}
+                            {% else %}
+                                <span>#태그 없음</span>
+                            {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    </div>
+                </div>
+                {% else %}<section class="profile-v3-card"><p class="hint">아직 맞은 문제가 없습니다.</p></section>{% endif %}
+            </section>
+        </section>
+
+        <section class="profile-tab-panel" data-tab-panel="stats">
+            <section class="profile-v3-list-section">
+                <h2>{{ display_username(target) }}의 통계</h2>
+                <div class="profile-v3-language-grid">
+                    {% for language, rows in language_result_rows.items() %}
+                    <div class="profile-v3-language-card">
+                        <h3>{{ language }}</h3>
+                        <div class="profile-v3-language-stats">
+                            {% for result, count in rows %}
+                            <div><span class="result {{ result }}">{{ result_label(result) }}</span><b>{{ count }}</b></div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% else %}
+                    <section class="profile-v3-card"><p class="hint">제출 통계가 없습니다.</p></section>
+                    {% endfor %}
+                </div>
+            </section>
+        </section>
+
+        <section class="profile-tab-panel" data-tab-panel="badges">
+            <section class="profile-v3-list-section">
+                <h2>{{ display_username(target) }}의 배지</h2>
+                <div class="profile-v3-sort-line profile-v3-asset-sort"><b>정렬</b><button type="button" class="active">이름 ↓</button><button type="button">획득순</button><button type="button">최근 추가</button></div>
+                <div class="profile-v3-item-list">
+                    {% for badge in badge_preview_items %}
+                    <div class="profile-v3-item-row"><div><span class="profile-v3-badge-icon">{% if badge.image %}<img src="{{ badge.image }}" alt="{{ badge.title }}">{% else %}{{ badge.icon }}{% endif %}</span><b>{{ badge.title }}</b><em>{{ badge.description }}</em></div><strong>{{ badge.earned }}</strong></div>
+                    {% endfor %}
+                </div>
+            </section>
+        </section>
+
+        <section class="profile-tab-panel" data-tab-panel="backgrounds">
+            <section class="profile-v3-list-section">
+                <h2>{{ display_username(target) }}의 배경</h2>
+                <div class="profile-v3-sort-line profile-v3-asset-sort"><b>정렬</b><button type="button" class="active">이름 ↓</button><button type="button">획득순</button><button type="button">최근 추가</button></div>
+                <div class="profile-v3-item-list">
+                    {% for bg in background_preview_items %}
+                    <div class="profile-v3-bg-row"><img src="{{ bg.image }}" alt="{{ bg.title }}"><div><b>{{ bg.title }}</b><em>조건 {{ bg.description }}</em></div><strong>{{ bg.earned }}</strong></div>
+                    {% else %}
+                    <div class="profile-v3-item-row"><div><b>등록된 배경이 없습니다.</b><em>관리자 페이지에서 기본 지급 배경 또는 획득 조건 배경을 추가하세요.</em></div></div>
+                    {% endfor %}
+                </div>
+            </section>
+        </section>
+
+        {% if user and (user.id == target.id or user.is_admin) %}
+        <section class="profile-tab-panel" data-tab-panel="settings">
+            <section id="profile-settings" class="profile-v3-card profile-v3-settings-card">
+                <h3>설정</h3>
+                {% if user and user.id == target.id %}
+                <div class="profile-v3-danger-zone only-danger">
+                    <h3>계정 탈퇴</h3>
+                    {% if delete_error %}<div class="error-box">{{ delete_error }}</div>{% endif %}
+                    <p class="hint">탈퇴하면 로그인할 수 없고 아이디는 다른 사용자가 다시 사용할 수 있습니다. 기존 제출 기록, 게시글, 댓글은 유지되며 작성자는 탈퇴한 사용자로 표시됩니다.</p>
+                    <form action="/users/{{ target.username }}/delete" method="post" class="small-form" onsubmit="return confirm('정말 계정을 탈퇴할까요? 이 작업은 되돌릴 수 없습니다.');">
+                        <label>현재 비밀번호</label>
+                        <input type="password" name="password" required>
+                        <label>확인 문구</label>
+                        <input type="text" name="confirm_text" placeholder="탈퇴하겠습니다." required>
+                        <button type="submit" class="danger">계정 탈퇴</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="hint">설정할 수 있는 항목이 없습니다.</p>
+                {% endif %}
+            </section>
+        </section>
+        {% endif %}
+
+        {% if user and (user.id == target.id or user.is_admin) %}
+        <div class="profile-v3-edit-modal" data-profile-edit-modal hidden>
+            <div class="profile-v3-edit-modal-backdrop" data-profile-edit-close></div>
+            <section class="profile-v3-edit-modal-card" role="dialog" aria-modal="true" aria-labelledby="profile-edit-title">
+                <div class="profile-v3-edit-modal-head">
+                    <div>
+                        <p>PROFILE EDIT</p>
+                        <h3 id="profile-edit-title">프로필 편집</h3>
+                    </div>
+                    <button type="button" data-profile-edit-close aria-label="닫기">×</button>
+                </div>
+                <form action="/users/{{ target.username }}/profile/edit" method="post" enctype="multipart/form-data" class="profile-v3-edit-form profile-v3-edit-modal-form">
+                    <div class="profile-v3-edit-preview-grid">
+                        <label class="profile-v3-edit-upload-tile">
+                            <span>프로필 사진</span>
+                            <strong>이미지 파일 선택</strong>
+                            <input type="file" name="profile_image" accept="image/png,image/jpeg,image/webp,image/gif">
+                        </label>
+                        <label class="profile-v3-edit-upload-tile wide profile-v3-background-select-tile">
+                            <span>프로필 배경</span>
+                            <strong>획득한 배경 선택</strong>
+                            <select name="selected_profile_background_id">
+                                <option value="0">기본 배경</option>
+                                {% for bg in earned_backgrounds %}
+                                <option value="{{ bg.id }}" {% if target.selected_profile_background_id == bg.id %}selected{% endif %}>{{ bg.title }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                    </div>
+                    <label class="profile-v3-edit-wide">
+                        <span>상태 메시지</span>
+                        <textarea name="profile_message" rows="3" maxlength="256" data-profile-message-input placeholder="프로필에 표시할 메시지">{{ target.profile_message }}</textarea>
+                        <div class="profile-v3-char-count"><span data-profile-message-count>{{ target.profile_message|length }}</span>/256</div>
+                    </label>
+                    <label class="profile-v3-edit-wide">
+                        <span>대표 배지</span>
+                        <select name="selected_profile_badge_id">
+                            <option value="0">대표 배지 없음</option>
+                            {% for badge in earned_badges %}
+                            <option value="{{ badge.id }}" {% if target.selected_profile_badge_id == badge.id %}selected{% endif %}>{{ badge.title }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <div class="profile-v3-earned-badge-picker" aria-label="획득한 배지">
+                        {% for badge in earned_badges %}
+                        <button type="button" class="profile-v3-earned-badge" data-badge-option="{{ badge.id }}" title="{{ badge.title }}">
+                            {% if badge.image %}<img src="{{ badge.image }}" alt="{{ badge.title }}">{% else %}<b>{{ badge.icon }}</b>{% endif %}
+                        </button>
+                        {% else %}
+                        <p>장착할 수 있는 배지가 없습니다.</p>
+                        {% endfor %}
+                    </div>
+                    <div class="profile-v3-earned-background-picker" aria-label="획득한 배경">
+                        {% for bg in earned_backgrounds %}
+                        <button type="button" class="profile-v3-earned-background" data-background-option="{{ bg.id }}" title="{{ bg.title }}">
+                            {% if bg.image %}<img src="{{ bg.image }}" alt="{{ bg.title }}">{% else %}<b>{{ bg.title }}</b>{% endif %}
+                        </button>
+                        {% else %}
+                        <p>선택할 수 있는 배경이 없습니다.</p>
+                        {% endfor %}
+                    </div>
+                    <div class="profile-v3-edit-modal-actions">
+                        <button type="button" class="profile-v3-glass-button" data-profile-edit-close>취소</button>
+                        <button type="submit" class="profile-v3-glass-button primary">저장</button>
+                    </div>
+                </form>
+            </section>
+        </div>
+        {% endif %}
     </div>
 </section>
 
-{% if user and (user.id == target.id or user.is_admin) %}
-<section class="box">
-    <h3>프로필 배경 실험 기능</h3>
-    <p class="hint">이미지 URL을 넣으면 프로필 상단 배경으로 표시됩니다. 비워두면 기본 배경으로 돌아갑니다.</p>
-    <form action="/users/{{ target.username }}/profile-background" method="post">
-        <label>배경 이미지 URL</label>
-        <input type="text" name="profile_background_url" value="{{ target.profile_background_url }}" placeholder="https://...">
-        <button type="submit">배경 저장</button>
-    </form>
-</section>
-{% endif %}
 
-{% if user and user.id == target.id %}
-<section class="box danger-zone">
-    <h3>계정 탈퇴</h3>
-    {% if delete_error %}<div class="error-box">{{ delete_error }}</div>{% endif %}
-    <p class="hint">탈퇴하면 로그인할 수 없고 아이디는 다른 사용자가 다시 사용할 수 있습니다. 기존 제출 기록, 게시글, 댓글은 유지되며 작성자는 탈퇴한 사용자로 표시됩니다.</p>
-    <form action="/users/{{ target.username }}/delete" method="post" class="small-form" onsubmit="return confirm('정말 계정을 탈퇴할까요? 이 작업은 되돌릴 수 없습니다.');">
-        <label>현재 비밀번호</label>
-        <input type="password" name="password" required>
-        <label>확인 문구</label>
-        <input type="text" name="confirm_text" placeholder="탈퇴하겠습니다." required>
-        <button type="submit" class="danger">계정 탈퇴</button>
-    </form>
-</section>
-{% endif %}
+<script>
+document.querySelectorAll('[data-profile-tabs] button').forEach((button) => {
+    button.addEventListener('click', () => {
+        const target = button.dataset.tabTarget;
+        document.querySelectorAll('[data-profile-tabs] button').forEach((item) => item.classList.remove('active'));
+        document.querySelectorAll('[data-tab-panel]').forEach((panel) => panel.classList.remove('active'));
+        button.classList.add('active');
+        const panel = document.querySelector(`[data-tab-panel="${target}"]`);
+        if (panel) panel.classList.add('active');
+    });
+});
+document.querySelectorAll('[data-tag-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+        const key = button.dataset.tagToggle;
+        const panel = document.querySelector(`[data-tag-panel="${key}"]`);
+        if (!panel) return;
+        const wrap = button.closest('.profile-v3-solved-row-wrap');
+        const opened = panel.classList.toggle('open');
+        panel.hidden = false;
+        button.classList.toggle('active', opened);
+        if (wrap) wrap.classList.toggle('tag-open', opened);
+        if (!opened) {
+            window.setTimeout(() => { if (!panel.classList.contains('open')) panel.hidden = true; }, 260);
+        }
+    });
+});
+const sortControls = document.querySelector('[data-profile-sort-controls]');
+if (sortControls) {
+    const sortButtons = Array.from(sortControls.querySelectorAll('[data-sort]'));
+    const applySort = (button, toggleDirection = true) => {
+        const key = button.dataset.sort;
+        const container = document.querySelector('.profile-v3-solved-table [data-solved-row-container]');
+        if (!container) return;
+        if (key !== 'random' && toggleDirection && button.classList.contains('active')) {
+            button.dataset.direction = button.dataset.direction === 'asc' ? 'desc' : 'asc';
+        }
+        const direction = button.dataset.direction || (key === 'title' || key === 'id' ? 'asc' : 'desc');
+        const rows = Array.from(container.querySelectorAll('[data-problem-row]'));
+        if (key === 'random') {
+            rows.sort(() => Math.random() - 0.5);
+        } else {
+            rows.sort((a, b) => {
+                let result;
+                if (key === 'title') {
+                    result = (a.dataset.title || '').localeCompare(b.dataset.title || '', 'ko');
+                } else {
+                    const av = Number(a.dataset[key] || 0);
+                    const bv = Number(b.dataset[key] || 0);
+                    result = av - bv;
+                }
+                return direction === 'asc' ? result : -result;
+            });
+        }
+        rows.forEach((row) => container.appendChild(row));
+        sortButtons.forEach((item) => {
+            item.classList.remove('active');
+            const arrow = item.querySelector('.sort-arrow');
+            if (arrow) arrow.textContent = '';
+        });
+        button.classList.add('active');
+        const arrow = button.querySelector('.sort-arrow');
+        if (arrow && key !== 'random') arrow.textContent = direction === 'asc' ? '↓' : '↑';
+    };
+    sortButtons.forEach((button) => {
+        button.addEventListener('click', () => applySort(button, true));
+    });
+    const initial = sortControls.querySelector('[data-sort="id"]');
+    if (initial) applySort(initial, false);
+}
+const detailButton = document.querySelector('[data-toggle-detail-difficulty]');
+if (detailButton) {
+    detailButton.addEventListener('click', () => {
+        const simple = document.querySelector('.profile-v3-difficulty-simple');
+        const detail = document.querySelector('.profile-v3-difficulty-detail');
+        const opened = detail && !detail.hidden;
+        if (simple) simple.hidden = !opened;
+        if (detail) detail.hidden = opened;
+        detailButton.textContent = opened ? '자세히' : '간단히';
+    });
+}
 
-<section class="box">
-    <h3>결과별 제출 통계</h3>
-    <table>
-        <thead><tr><th>결과</th><th>제출 수</th></tr></thead>
-        <tbody>
-        {% for result, count in result_rows %}
-            <tr><td class="result {{ result }}">{{ result_label(result) }}</td><td>{{ count }}</td></tr>
-        {% else %}
-            <tr><td colspan="2">제출이 없습니다.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</section>
+document.querySelectorAll('[data-profile-edit-open]').forEach((button) => {
+    button.addEventListener('click', () => {
+        const modal = document.querySelector('[data-profile-edit-modal]');
+        if (!modal) return;
+        modal.hidden = false;
+        document.body.classList.add('profile-modal-open');
+    });
+});
+document.querySelectorAll('[data-profile-edit-close]').forEach((button) => {
+    button.addEventListener('click', () => {
+        const modal = document.querySelector('[data-profile-edit-modal]');
+        if (!modal) return;
+        modal.hidden = true;
+        document.body.classList.remove('profile-modal-open');
+    });
+});
+document.querySelectorAll('[data-badge-option]').forEach((button) => {
+    button.addEventListener('click', () => {
+        const select = document.querySelector('.profile-v3-edit-modal select[name="selected_profile_badge_id"]');
+        if (!select) return;
+        select.value = button.dataset.badgeOption || '0';
+        document.querySelectorAll('[data-badge-option]').forEach((item) => item.classList.remove('selected'));
+        button.classList.add('selected');
+    });
+});
+document.querySelectorAll('[data-background-option]').forEach((button) => {
+    button.addEventListener('click', () => {
+        const select = document.querySelector('.profile-v3-edit-modal select[name="selected_profile_background_id"]');
+        if (!select) return;
+        select.value = button.dataset.backgroundOption || '0';
+        document.querySelectorAll('[data-background-option]').forEach((item) => item.classList.remove('selected'));
+        button.classList.add('selected');
+    });
+});
 
-<section class="box">
-    <h3>푼 문제</h3>
-    {% if solved_ids %}
-    <p>{% for pid in solved_ids %}<a class="tag" href="/problems/{{ pid }}">{{ pid }}</a> {% endfor %}</p>
-    {% else %}<p class="hint">아직 맞은 문제가 없습니다.</p>{% endif %}
-</section>
 
-<section class="box">
-    <h3>시도했지만 아직 못 푼 문제</h3>
-    {% if tried_only_ids %}
-    <p>{% for pid in tried_only_ids %}<a class="tag" href="/problems/{{ pid }}">{{ pid }}</a> {% endfor %}</p>
-    {% else %}<p class="hint">시도했지만 아직 못 푼 문제가 없습니다.</p>{% endif %}
-</section>
 
-<section class="box">
-    <h3>최근 일반 제출</h3>
-    <table>
-        <thead><tr><th>#</th><th>문제</th><th>결과</th><th>시간</th></tr></thead>
-        <tbody>
-        {% for s in recent %}
-            <tr><td><a href="/submissions/{{ s.id }}">{{ s.id }}</a></td><td>{{ s.problem_id }}</td><td class="result {{ s.result }}">{{ result_label(s.result) }}</td><td>{{ s.created_at }}</td></tr>
-        {% else %}
-            <tr><td colspan="4">제출이 없습니다.</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</section>
+document.querySelectorAll('[data-profile-message-input]').forEach((textarea) => {
+    const wrapper = textarea.closest('label') || textarea.parentElement;
+    const counter = wrapper ? wrapper.querySelector('[data-profile-message-count]') : null;
+    const update = () => { if (counter) counter.textContent = textarea.value.length; };
+    textarea.addEventListener('input', update);
+    update();
+});
+</script>
 {% endblock %}

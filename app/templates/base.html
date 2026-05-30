@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <title>Online Judge</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/style.css?v=38_6_39">
     <script>
         window.MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
@@ -12,8 +13,21 @@
     </script>
     <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
     <script defer src="/static/math-copy.js"></script>
+    <meta name="csrf-token" content="{{ csrf_token(request) }}">
+    <meta http-equiv="Cache-Control" content="no-store">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
 </head>
-<body>
+<body class="interactive-theme">
+<div class="oj-bg" aria-hidden="true">
+    <div class="oj-bg-base"></div>
+    <div class="oj-bg-light oj-bg-light-main"></div>
+    <div class="oj-bg-light oj-bg-light-sub"></div>
+    <div class="oj-bg-orb orb-blue"></div>
+    <div class="oj-bg-orb orb-emerald"></div>
+    <div class="oj-bg-orb orb-purple"></div>
+    <div class="oj-bg-grid"></div>
+</div>
 <header>
     <div class="header-inner">
         <h1><a href="/">Online Judge</a></h1>
@@ -43,5 +57,31 @@
 <main>
     {% block content %}{% endblock %}
 </main>
+<script src="/static/admin-danger-confirm.js"></script>
+<script src="/static/interactive-theme.js?v=38_6_39"></script>
+<script>
+window.addEventListener('pageshow', function(event) {
+    if (event.persisted) {
+        window.location.reload();
+    }
+});
+
+(function csrfProtectionAutoInsert() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    if (!meta) return;
+    const token = meta.getAttribute('content');
+    if (!token) return;
+    document.querySelectorAll('form[method]').forEach(function(form) {
+        const method = (form.getAttribute('method') || '').toLowerCase();
+        if (!['post', 'put', 'patch', 'delete'].includes(method)) return;
+        if (form.querySelector('input[name="csrf_token"]')) return;
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'csrf_token';
+        input.value = token;
+        form.appendChild(input);
+    });
+})();
+</script>
 </body>
 </html>

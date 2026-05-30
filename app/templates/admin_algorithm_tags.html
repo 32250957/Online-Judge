@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>알고리즘 태그 관리</h2>
+<p class="hint">문제 작성/수정 화면에서는 이곳에 등록된 활성 태그만 선택할 수 있습니다.</p>
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+{% if message %}<div class="success-box">{{ message }}</div>{% endif %}
+
+<section class="box">
+    <h3>새 태그 추가</h3>
+    <form method="post" action="/admin/algorithm-tags" class="grid two compact-fields">
+        <div><label>표시 이름</label><input type="text" name="name" placeholder="예: 다이나믹 프로그래밍" required></div>
+        <div><label>태그 키</label><input type="text" name="key" placeholder="예: dp"></div>
+        <div><label>정렬 순서</label><input type="number" name="order_index" value="0"></div>
+        <div><label>설명</label><input type="text" name="description" placeholder="선택 사항"></div>
+        <div><label><input type="checkbox" name="is_active" checked> 활성화</label></div>
+        <div><button type="submit">태그 추가</button></div>
+    </form>
+</section>
+
+<section class="box">
+    <h3>등록된 태그</h3>
+    <table>
+        <thead><tr><th>순서</th><th>키</th><th>이름</th><th>상태</th><th>설명</th><th>관리</th></tr></thead>
+        <tbody>
+        {% for tag in tags %}
+        <tr>
+            <form method="post" action="/admin/algorithm-tags/{{ tag.id }}/edit">
+                <td><input type="number" name="order_index" value="{{ tag.order_index }}" class="short-input"></td>
+                <td><code>{{ tag.key }}</code></td>
+                <td><input type="text" name="name" value="{{ tag.name }}" required></td>
+                <td><label><input type="checkbox" name="is_active" {% if tag.is_active %}checked{% endif %}> 활성</label></td>
+                <td><input type="text" name="description" value="{{ tag.description }}"></td>
+                <td class="inline-actions">
+                    <button type="submit">저장</button>
+            </form>
+                    <form method="post" action="/admin/algorithm-tags/{{ tag.id }}/delete" class="inline-actions" onsubmit="return confirm('이 태그를 삭제할까요? 기존 문제의 태그 문자열에서는 제거되지 않을 수 있습니다.');">
+                        <button type="submit" class="danger">삭제</button>
+                    </form>
+                </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">등록된 태그가 없습니다.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

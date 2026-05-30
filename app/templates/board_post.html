@@ -19,7 +19,7 @@
         </details>
         {% endif %}
     </div>
-    <p class="hint">{{ board_name }} · {{ display_username(post.author) }} · {{ post.created_at }}</p>
+    <p class="hint">{{ board_name }} · {% if post.author and not post.author.is_deleted %}<a class="username-link" href="/users/{{ post.author.username }}">{{ display_username(post.author) }}</a>{% else %}{{ display_username(post.author) }}{% endif %} · {{ post.created_at|kst_time }}</p>
     <div class="post-content">{{ post.content|rich_text }}</div>
 </section>
 
@@ -27,7 +27,7 @@
     <h3>댓글</h3>
     {% for comment in comments %}
     <div class="comment-card">
-        <p class="hint">{{ display_username(comment.author) }} · {{ comment.created_at }}</p>
+        <p class="hint">{% if comment.author and not comment.author.is_deleted %}<a class="username-link" href="/users/{{ comment.author.username }}">{{ display_username(comment.author) }}</a>{% else %}{{ display_username(comment.author) }}{% endif %} · {{ comment.created_at|kst_time }}</p>
         <div>{{ comment.content|rich_text }}</div>
         {% if user and (user.is_admin or comment.author_id == user.id) %}
         <form class="inline-actions" action="/boards/posts/{{ post.id }}/comments/{{ comment.id }}/delete" method="post" onsubmit="return confirm('이 댓글을 삭제할까요?');">

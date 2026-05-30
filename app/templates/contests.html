@@ -5,15 +5,17 @@
     {% if user and user.is_admin %}<a class="button" href="/admin/contests/new">대회 개최</a>{% endif %}
 </div>
 <table>
-    <thead><tr><th>번호</th><th>대회명</th><th>상태</th><th>시작</th><th>종료</th><th>문제 수</th></tr></thead>
+    <thead><tr><th>번호</th><th>대회명</th><th>상태</th><th>남은 시간</th><th>시작</th><th>종료</th><th>문제 수</th></tr></thead>
     <tbody>
         {% for contest in contests %}
+        {% set phase = contest_phase_info(contest) %}
         <tr>
             <td>{{ contest.display_number or contest.id }}</td>
-            <td><a href="/contests/{{ contest.id }}">{{ contest.title }}</a></td>
-            <td>{{ contest_status(contest) }}</td>
-            <td>{{ contest.start_time }}</td>
-            <td>{{ contest.end_time }}</td>
+            <td><a href="/contests/{{ contest.id }}">{{ contest.title }}</a>{% if contest.is_exam_mode %}<br><span class="badge danger-badge">시험/평가 모드</span>{% endif %}</td>
+            <td><span class="badge badge-{{ phase.class }}">{{ phase.status }}</span></td>
+            <td>{% if phase.remaining_seconds %}{{ phase.time_label }} {{ format_seconds_korean(phase.remaining_seconds) }}{% else %}{{ phase.time_label }}{% endif %}</td>
+            <td>{{ contest.start_time|plain_time }}</td>
+            <td>{{ contest.end_time|plain_time }}</td>
             <td>{{ contest.problem_links|length }}</td>
         </tr>
         {% endfor %}

@@ -1,39 +1,108 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-title">
-    <h2>문제 목록</h2>
-    {% if user and user.is_admin %}<a class="button" href="/admin/problems/new">일반 문제 추가</a>{% endif %}
-</div>
-<form method="get" class="box search-box">
-    <label>문제 검색</label>
-    <input type="text" name="q" value="{{ q }}" placeholder="문제 번호, 제목, 태그, 출처 검색">
-    <label>난이도</label>
-    <select name="difficulty">
-        <option value="">전체</option>
-        {% for d in difficulties %}
-        <option value="{{ d }}" {% if difficulty == d %}selected{% endif %}>{{ d }}</option>
-        {% endfor %}
-    </select>
-    <label>태그</label>
-    <input type="text" name="tag" value="{{ tag }}" placeholder="예: 구현, DP">
-    <button type="submit">검색</button>
-    <a class="button secondary" href="/problems">초기화</a>
-</form>
-<table>
-    <thead><tr><th>번호</th><th>제목</th><th>난이도</th><th>태그</th><th>관리</th></tr></thead>
-    <tbody>
-        {% for problem in problems %}
-        <tr>
-            <td>{{ problem.id }}</td>
-            <td><a href="/problems/{{ problem.id }}">{{ problem.title }}</a></td>
-            <td>{{ problem.difficulty }}</td>
-            <td>{{ problem.tags if problem.tags else '-' }}</td>
-            <td>{% if user and user.is_admin %}<a href="/admin/problems/{{ problem.id }}/edit">수정</a>
-                <form action="/admin/problems/{{ problem.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('문제 {{ problem.id }}번과 관련 제출/대회 연결/연습 연결을 삭제할까요?');"><button type="submit" class="danger">삭제</button></form>{% else %}-{% endif %}</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="5">조건에 맞는 문제가 없습니다.</td></tr>
-        {% endfor %}
-    </tbody>
-</table>
+<section class="landing-hero refined-hero">
+    <div class="hero-copy">
+        <h2 class="hero-slogan">THINK.<br>SOLVE.<br><span>GROW.</span></h2>
+        <div class="hero-actions">
+            <a class="button hero-primary" href="#problem-list">문제 풀러가기 <span>›</span></a>
+            <a class="button hero-secondary" href="/contests">진행 중 대회 보기</a>
+            {% if user and user.is_admin %}<a class="button hero-secondary" href="/admin/problems/new">일반 문제 추가</a>{% endif %}
+        </div>
+    </div>
+    <div class="hero-panels">
+        <div class="interactive-card queue-card" id="front-queue-card">
+            <div class="card-title-row">
+                <div>
+                    <div class="eyebrow">JUDGE QUEUE</div>
+                    <h3>채점 상태</h3>
+                </div>
+                <span class="status-pill" data-queue-health>정상</span>
+            </div>
+            <div class="queue-line">
+                <div><b>일반 제출</b><span data-normal-count>실행 {{ queue_status.normal.running }} · 대기 {{ queue_status.normal.queued }}</span></div>
+                <div class="progress"><span data-normal-bar style="width:{{ queue_status.normal.width }}%"></span></div>
+            </div>
+            <div class="queue-line">
+                <div><b>재채점</b><span data-rejudge-count>실행 {{ queue_status.rejudge.running }} · 대기 {{ queue_status.rejudge.queued }}</span></div>
+                <div class="progress"><span data-rejudge-bar style="width:{{ queue_status.rejudge.width }}%"></span></div>
+            </div>
+            <div class="queue-line">
+                <div><b>대기 큐</b><span data-waiting-count>{{ queue_status.waiting.count }}개</span></div>
+                <div class="progress"><span data-waiting-bar style="width:{{ queue_status.waiting.width }}%"></span></div>
+            </div>
+        </div>
+        <div class="mini-panel-grid">
+            <div class="interactive-card mini-panel">
+                <span>진행 중 대회</span>
+                <b data-active-contest-title class="{% if not active_contest %}empty-contest-title{% endif %}">{% if active_contest %}{{ active_contest.title }}{% else %}진행 중인 대회가 없습니다{% endif %}</b>
+            </div>
+            <div class="interactive-card mini-panel profile-mini-panel">
+                <span>내 프로필</span>
+                {% if user and profile_summary %}
+                    <b class="tier-text tier-{{ profile_tier_class }}">{{ profile_summary.tier_name }}</b>
+                    <strong>{{ profile_summary.rating }}</strong>
+                {% else %}
+                    <b>로그인 필요</b>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<section id="problem-list" class="content-card problem-list-card glass-panel-card">
+    <div class="page-title compact-title">
+        <div>
+            <div class="eyebrow">PROBLEM SET</div>
+            <h2>문제 목록</h2>
+        </div>
+        {% if user and user.is_admin %}<a class="button" href="/admin/problems/new">일반 문제 추가</a>{% endif %}
+    </div>
+
+    <form method="get" class="box glass-search refined-search">
+        <div class="search-field search-main-field">
+            <label>문제 검색</label>
+            <input type="text" name="q" value="{{ q }}" placeholder="문제 번호, 제목, 출처 검색">
+        </div>
+        <div class="search-field">
+            <label>태그</label>
+            <select name="tag">
+                <option value="">전체</option>
+                {% for algorithm_tag in algorithm_tags %}
+                <option value="{{ algorithm_tag.key }}" {% if tag == algorithm_tag.key %}selected{% endif %}>{{ algorithm_tag.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="search-actions">
+            <button type="submit">검색</button>
+            <a class="button secondary" href="/problems">초기화</a>
+        </div>
+    </form>
+
+    <div class="table-wrap glass-table-wrap">
+        <table class="interactive-table glass-table">
+            <thead><tr><th>번호</th><th>제목</th><th>상태</th><th>티어</th><th>태그</th>{% if user and user.is_admin %}<th>관리</th>{% endif %}</tr></thead>
+            <tbody>
+                {% for problem in problems %}
+                <tr>
+                    <td class="problem-id-cell">{{ problem.id }}</td>
+                    <td><a class="problem-title-link" href="/problems/{{ problem.id }}">{{ problem.title }}</a></td>
+                    <td>{% if user and user.is_admin %}{% for badge in problem_status_badges(problem) %}<span class="badge badge-{{ badge.kind }}">{{ badge.label }}</span> {% endfor %}{% else %}{% if problem.is_judge_ready %}<span class="badge badge-ok">제출 가능</span>{% else %}<span class="badge badge-warn">채점 준비 중</span>{% endif %}{% endif %}</td>
+                    <td>{{ tier_badge(problem.tier, small=True) }}</td>
+                    <td class="problem-tag-cell">{{ problem_tags_display.get(problem.id, '-') }}</td>
+                    {% if user and user.is_admin %}
+                    <td>
+                        <div class="management-actions">
+                            <a class="button small-button edit-button" href="/admin/problems/{{ problem.id }}/edit">수정</a>
+                            <form action="/admin/problems/{{ problem.id }}/delete" method="post" class="inline-actions" onsubmit="return confirmDanger(this, '문제를 삭제하겠습니다', '문제와 관련 제출/대회 연결/연습 연결을 삭제합니다.');"><button type="submit" class="danger small-button">삭제</button></form>
+                        </div>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="{{ 6 if user and user.is_admin else 5 }}">조건에 맞는 문제가 없습니다.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
 {% endblock %}

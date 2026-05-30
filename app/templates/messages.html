@@ -4,7 +4,7 @@
 {% for message in messages %}
 <section class="box {% if not message.is_read %}unread{% endif %}">
     <h3>{{ message.title }}</h3>
-    <p class="hint">{{ message.created_at }} / {{ message.message_type }}</p>
+    <p class="hint">{{ message.created_at|kst_time }} / {{ message.message_type }}</p>
     {{ message.content|rich_text }}
     {% if message.message_type == "group_invite" and message.action_status == "pending" %}
     <form class="inline-actions" action="/messages/{{ message.id }}/group-invite/accept" method="post"><button type="submit">초대 수락</button></form>

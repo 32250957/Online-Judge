@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>{% if contest and link %}{{ link.label }}번{% else %}{{ problem.id }}번{% endif %} - {{ problem.title }}</h2>
-<p class="hint">난이도: {{ problem.difficulty }}{% if problem.tags %} · 태그: {{ problem.tags }}{% endif %}{% if problem.source %} · 출처: {{ problem.source }}{% endif %} · 허용 언어: {{ allowed_language_labels(problem) }}</p>
+<p class="hint">티어: {{ tier_badge(problem.tier, small=True) }}{% if problem_tag_names %} · 태그: {% for tag_name in problem_tag_names %}<span class="tag">{{ tag_name }}</span> {% endfor %}{% endif %}{% if problem.source %} · 출처: {{ problem.source }}{% endif %} · 허용 언어: {{ allowed_language_labels(problem) }} · 시간 제한: {{ language_time_limit_summary(problem) }} · 메모리 제한: {{ problem.memory_limit }}MB</p>
 {% if problem.problem_author or problem.error_finder or problem.typo_finder %}
 <div class="meta-box">
     {% if problem.problem_author %}<span><b>출제:</b> {{ problem.problem_author }}</span>{% endif %}
@@ -14,22 +14,31 @@
 {% if contest %}
 <div class="info-box">
     <b>대회:</b> <a href="/contests/{{ contest.id }}">{{ contest.title }}</a><br>
-    <b>시작:</b> {{ contest.start_time }}<br>
-    <b>종료:</b> {{ contest.end_time }}<br>
-    <b>상태:</b> {% if contest.is_ended %}강제 종료{% elif now < contest.start_time %}시작 전{% elif now > contest.end_time %}종료{% else %}진행 중{% endif %}<br>
+    <b>시작:</b> {{ contest.start_time|plain_time }}<br>
+    <b>종료:</b> {{ contest.end_time|plain_time }}<br>
+    {% set phase = phase_info if phase_info is defined else contest_phase_info(contest) %}
+    <b>상태:</b> <span class="badge badge-{{ phase.class }}">{{ phase.status }}</span><br>
     <b>남은 시간:</b> <span id="timer"></span>
+    <p class="hint">{{ phase.message }}</p>
 </div>
 <script>
-const endTime = new Date("{{ contest.end_time.isoformat() }}").getTime();
+const serverNowAtLoad = Number({{ server_now_ms if server_now_ms is defined else 0 }});
+const browserNowAtLoad = Date.now();
+const startTime = Number({{ contest_start_ms if contest_start_ms is defined else 0 }});
+const endTime = Number({{ contest_end_ms if contest_end_ms is defined else 0 }});
 const manuallyEnded = {{ "true" if contest.is_ended else "false" }};
-function updateTimer() {
-    const diff = endTime - Date.now();
-    const timer = document.getElementById("timer");
-    if (manuallyEnded || diff <= 0) { timer.textContent = "대회 종료"; return; }
+function formatDuration(diff) {
     const h = Math.floor(diff / 1000 / 60 / 60);
     const m = Math.floor(diff / 1000 / 60) % 60;
     const s = Math.floor(diff / 1000) % 60;
-    timer.textContent = `${h}시간 ${m}분 ${s}초`;
+    return `${h}시간 ${m}분 ${s}초`;
+}
+function updateTimer() {
+    const timer = document.getElementById("timer");
+    const nowMs = serverNowAtLoad ? serverNowAtLoad + (Date.now() - browserNowAtLoad) : Date.now();
+    if (manuallyEnded || nowMs > endTime) { timer.textContent = "대회 종료"; return; }
+    if (nowMs < startTime) { timer.textContent = `시작까지 ${formatDuration(startTime - nowMs)}`; return; }
+    timer.textContent = `종료까지 ${formatDuration(endTime - nowMs)}`;
 }
 updateTimer(); setInterval(updateTimer, 1000);
 </script>
@@ -38,8 +47,8 @@ updateTimer(); setInterval(updateTimer, 1000);
 {% if practice and group %}
 <div class="info-box">
     <b>그룹 연습:</b> <a href="/groups/{{ group.id }}#practice">{{ group.name }} / {{ practice.title }}</a><br>
-    <b>시작:</b> {{ practice.start_time if practice.start_time else "제한 없음" }}<br>
-    <b>종료:</b> {{ practice.end_time if practice.end_time else "제한 없음" }}
+    <b>시작:</b> {{ practice.start_time|plain_time if practice.start_time else "제한 없음" }}<br>
+    <b>종료:</b> {{ practice.end_time|plain_time if practice.end_time else "제한 없음" }}
 </div>
 {% endif %}
 
@@ -89,7 +98,7 @@ updateTimer(); setInterval(updateTimer, 1000);
         {% if not problem.is_judge_ready %}
             <div class="error-box">채점 준비 중인 문제입니다. 지문은 볼 수 있지만 아직 제출할 수 없습니다.</div>
         {% elif user.submit_banned_until and user.submit_banned_until > now %}
-            <div class="error-box">제출 제한 중입니다.<br>제한 종료: {{ user.submit_banned_until }}<br>사유: {{ user.ban_reason if user.ban_reason else "-" }}</div>
+            <div class="error-box">제출 제한 중입니다.<br>제한 종료: {{ user.submit_banned_until|plain_time }}<br>사유: {{ user.ban_reason if user.ban_reason else "-" }}</div>
         {% elif contest and (contest.is_ended or now < contest.start_time or now > contest.end_time) %}
             <div class="error-box">현재 제출할 수 없는 대회 상태입니다.</div>
         {% elif practice and ((practice.start_time and now < practice.start_time) or (practice.end_time and now > practice.end_time)) %}

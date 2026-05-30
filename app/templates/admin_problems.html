@@ -18,10 +18,6 @@
             <input type="text" name="keyword" value="{{ keyword }}" placeholder="제목, 지문, 태그, 출처, 출제자">
         </div>
         <div>
-            <label>난이도</label>
-            <input type="text" name="difficulty" value="{{ difficulty }}" placeholder="예: Bronze, 쉬움, 중간">
-        </div>
-        <div>
             <label>태그</label>
             <input type="text" name="tag" value="{{ tag }}" placeholder="예: DP, 구현">
         </div>
@@ -41,6 +37,7 @@
                 <option value="private" {% if registration_type == 'private' %}selected{% endif %}>비공개 문제</option>
                 <option value="judge_ready" {% if registration_type == 'judge_ready' %}selected{% endif %}>제출 가능</option>
                 <option value="judge_not_ready" {% if registration_type == 'judge_not_ready' %}selected{% endif %}>채점 준비 중</option>
+                <option value="testcase_warning" {% if registration_type == 'testcase_warning' %}selected{% endif %}>테스트케이스 점검 필요</option>
             </select>
         </div>
         <div class="filter-actions">
@@ -53,16 +50,39 @@
 
 <div class="box">
     <h3>검색 결과 일괄 작업</h3>
-    <form method="post" action="/admin/problems/bulk-rejudge" onsubmit="return confirm('현재 검색 조건에 해당하는 모든 문제의 제출을 재채점 큐에 넣을까요?');">
+    <form method="post" action="/admin/problems/bulk-rejudge" onsubmit="return confirmDanger(this, '재채점하겠습니다', '현재 검색 조건에 해당하는 모든 문제의 제출을 재채점 큐에 넣습니다.');">
         <input type="hidden" name="problem_id" value="{{ problem_id }}">
         <input type="hidden" name="registration_type" value="{{ registration_type }}">
         <input type="hidden" name="keyword" value="{{ keyword }}">
-        <input type="hidden" name="difficulty" value="{{ difficulty }}">
         <input type="hidden" name="tag" value="{{ tag }}">
         <input type="hidden" name="source" value="{{ source }}">
+        <fieldset class="compact-fieldset">
+            <legend>재채점 언어 선택</legend>
+            <p class="hint">아무것도 선택하지 않으면 모든 언어의 제출을 재채점합니다.</p>
+            {% for lang in language_options %}
+                <label class="inline-check"><input type="checkbox" name="rejudge_languages" value="{{ lang.value }}"> {{ lang.label }}</label>
+            {% endfor %}
+        </fieldset>
         <button type="submit">검색 결과 전체 재채점</button>
     </form>
     <p class="hint">문제 수가 많으면 큐에 등록되는 데 시간이 걸릴 수 있습니다. 채점 진행 상황은 관리자 채점 큐에서 확인하세요.</p>
+</div>
+
+<div class="box danger-box">
+    <h3>제출 번호 기준 재채점</h3>
+    <p class="hint">워커나 Docker 이미지 문제가 발생한 시점 이후의 제출을 한 번에 다시 채점할 때 사용합니다. 입력한 제출 번호를 포함하여 이후 제출을 재채점합니다.</p>
+    <form method="post" action="/admin/submissions/rejudge-after" onsubmit="return confirmDanger(this, '재채점하겠습니다', '입력한 제출 번호를 포함하여 이후 모든 제출을 재채점 큐에 넣습니다.');">
+        <label>시작 제출 번호</label>
+        <input type="number" name="start_submission_id" min="1" required placeholder="예: 1520">
+        <fieldset class="compact-fieldset">
+            <legend>언어 선택</legend>
+            <p class="hint">아무것도 선택하지 않으면 모든 언어의 제출을 재채점합니다.</p>
+            {% for lang in language_options %}
+                <label class="inline-check"><input type="checkbox" name="rejudge_languages" value="{{ lang.value }}"> {{ lang.label }}</label>
+            {% endfor %}
+        </fieldset>
+        <button type="submit" class="danger-button">제출 번호 이후 재채점</button>
+    </form>
 </div>
 
 <div class="box">
@@ -72,7 +92,7 @@
                 <th>내부 번호</th>
                 <th>표시 번호</th>
                 <th>제목</th>
-                <th>난이도</th>
+                <th>티어</th>
                 <th>태그</th>
                 <th>출처</th>
                 <th>등록 유형</th>
@@ -87,8 +107,8 @@
             <td>{{ problem.id }}</td>
             <td>{{ problem.display_code or problem.id }}</td>
             <td><a href="/problems/{{ problem.id }}">{{ problem.title }}</a></td>
-            <td>{{ problem.difficulty or '미지정' }}</td>
-            <td class="small-cell">{{ problem.tags or '-' }}</td>
+            <td>{{ tier_badge(problem.tier, small=True) }}</td>
+            <td class="small-cell problem-tag-cell">{{ problem_tags_display.get(problem.id, '-') }}</td>
             <td class="small-cell">{{ problem.source or '-' }}</td>
             <td>
                 {% if problem.origin_type == 'group_contest' %}
@@ -100,8 +120,9 @@
                 {% endif %}
             </td>
             <td>
-                {% if problem.is_public %}<span class="badge">공개</span>{% else %}<span class="hint">비공개</span>{% endif %}
-                / {% if problem.is_judge_ready %}<span class="badge">제출 가능</span>{% else %}<span class="hint">준비 중</span>{% endif %}
+                {% for badge in problem_status_badges(problem) %}
+                    <span class="badge badge-{{ badge.kind }}">{{ badge.label }}</span>
+                {% endfor %}
             </td>
             <td>
                 {% if problem.review_status == 'review_pending' %}<span class="badge">검토 요청</span>
@@ -130,7 +151,7 @@
     </table>
 
     <div class="pagination">
-        {% set query_base = 'problem_id=' ~ problem_id ~ '&registration_type=' ~ registration_type ~ '&keyword=' ~ keyword ~ '&difficulty=' ~ difficulty ~ '&tag=' ~ tag ~ '&source=' ~ source %}
+        {% set query_base = 'problem_id=' ~ problem_id ~ '&registration_type=' ~ registration_type ~ '&keyword=' ~ keyword ~ '&tag=' ~ tag ~ '&source=' ~ source %}
         {% if page > 1 %}<a class="button secondary" href="/admin/problems?{{ query_base }}&page={{ page - 1 }}">이전</a>{% endif %}
         <span class="hint">{{ page }} / {{ total_pages }} 페이지</span>
         {% if page < total_pages %}<a class="button secondary" href="/admin/problems?{{ query_base }}&page={{ page + 1 }}">다음</a>{% endif %}

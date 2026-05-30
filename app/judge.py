@@ -33,6 +33,29 @@ def language_label(language: str) -> str:
     return SUPPORTED_LANGUAGES.get(language, {}).get("label", language)
 
 
+def effective_time_limit_for_language(base_time_limit, language: str, python_time_limit=None, c_time_limit=None, cpp_time_limit=None, java_time_limit=None) -> int:
+    """문제 기본 시간 제한과 언어별 보정/개별 제한을 합쳐 실제 채점 제한을 계산한다."""
+    base = max(1, int(base_time_limit or 1))
+    lang = normalize_language(language)
+    overrides = {
+        "python": python_time_limit,
+        "c": c_time_limit,
+        "cpp": cpp_time_limit,
+        "java": java_time_limit,
+    }
+    override = overrides.get(lang)
+    try:
+        if override is not None and str(override).strip() != "":
+            return max(1, int(override))
+    except (TypeError, ValueError):
+        pass
+    if lang == "java":
+        return base * 2 + 1
+    if lang == "python":
+        return base * 3 + 2
+    return base
+
+
 def normalize_output(text: str | None) -> str:
     text = text or ""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -57,14 +80,14 @@ with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)
         memory_kb = int(getattr(usage, "ru_maxrss", 0))
-        metrics = {"runtime_ms": elapsed_ms, "memory_kb": memory_kb, "timed_out": False}
+        metrics = {"runtime_ms": elapsed_ms, "memory_kb": memory_kb, "timed_out": False, "oom_killed": completed.returncode in (137, -9)}
         sys.stdout.buffer.write(completed.stdout)
         sys.stderr.buffer.write(completed.stderr)
         sys.stderr.write("\n__OJ_METRICS__" + json.dumps(metrics, ensure_ascii=False) + "\n")
         raise SystemExit(completed.returncode)
     except subprocess.TimeoutExpired:
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        metrics = {"runtime_ms": elapsed_ms, "memory_kb": 0, "timed_out": True}
+        metrics = {"runtime_ms": elapsed_ms, "memory_kb": 0, "timed_out": True, "oom_killed": False}
         sys.stderr.write("\n__OJ_METRICS__" + json.dumps(metrics, ensure_ascii=False) + "\n")
         raise SystemExit(124)
 '''
@@ -132,13 +155,17 @@ fi
 
 end_ns=$(date +%s%N)
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
-if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; then
+oom_killed=false
+if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
   timed_out=true
+fi
+if [ "$rc" -eq 137 ]; then
+  oom_killed=true
 fi
 rm -f "$run_err" 2>/dev/null || true
 printf '
-__OJ_METRICS__{"runtime_ms":%s,"memory_kb":%s,"timed_out":%s}
-' "$elapsed_ms" "$memory_kb" "$timed_out" >&2
+__OJ_METRICS__{"runtime_ms":%s,"memory_kb":%s,"timed_out":%s,"oom_killed":%s}
+' "$elapsed_ms" "$memory_kb" "$timed_out" "$oom_killed" >&2
 exit "$rc"
 '''
 
@@ -188,13 +215,14 @@ set -- java -cp /tmp Main
 }
 
 
-def _split_metrics(stderr_text: str) -> tuple[str, int, int, bool]:
+def _split_metrics(stderr_text: str) -> tuple[str, int, int, bool, bool]:
     marker = "__OJ_METRICS__"
     runtime_ms = 0
     memory_kb = 0
     timed_out = False
+    oom_killed = False
     if marker not in stderr_text:
-        return stderr_text, runtime_ms, memory_kb, timed_out
+        return stderr_text, runtime_ms, memory_kb, timed_out, oom_killed
     before, after = stderr_text.rsplit(marker, 1)
     line = after.strip().splitlines()[0] if after.strip() else "{}"
     try:
@@ -202,9 +230,20 @@ def _split_metrics(stderr_text: str) -> tuple[str, int, int, bool]:
         runtime_ms = int(metrics.get("runtime_ms", 0) or 0)
         memory_kb = int(metrics.get("memory_kb", 0) or 0)
         timed_out = bool(metrics.get("timed_out", False))
+        oom_killed = bool(metrics.get("oom_killed", False))
     except Exception:
         pass
-    return before.strip(), runtime_ms, memory_kb, timed_out
+    return before.strip(), runtime_ms, memory_kb, timed_out, oom_killed
+
+
+def _looks_like_memory_limit_exceeded(return_code: int, stderr_text: str, memory_kb: int, memory_limit_mb: int, oom_killed: bool) -> bool:
+    if oom_killed or return_code in {137, -9}:
+        return True
+    lowered = (stderr_text or "").lower()
+    if "oom" in lowered or "out of memory" in lowered or "cannot allocate memory" in lowered:
+        return True
+    limit_kb = max(int(memory_limit_mb or 0), 0) * 1024
+    return bool(limit_kb and memory_kb and memory_kb > limit_kb)
 
 
 def _docker_available() -> tuple[bool, str]:
@@ -232,7 +271,7 @@ def _base_docker_command(image: str, memory_limit: int) -> list[str]:
     ]
 
 
-def _run_test(language: str, code: str, input_data: str, time_limit: int, memory_limit: int) -> tuple[int, str, str, int, int, bool, str]:
+def _run_test(language: str, code: str, input_data: str, time_limit: int, memory_limit: int) -> tuple[int, str, str, int, int, bool, bool, str]:
     language = normalize_language(language)
     encoded_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
     started = time.perf_counter()
@@ -252,18 +291,18 @@ def _run_test(language: str, code: str, input_data: str, time_limit: int, memory
             "sh", "-lc", LANGUAGE_SCRIPTS[language],
         ]
     else:
-        return 127, "", f"지원하지 않는 언어입니다: {language}", 0, 0, False, "system"
+        return 127, "", f"지원하지 않는 언어입니다: {language}", 0, 0, False, False, "system"
     try:
         # 컴파일 언어는 컨테이너 시작/컴파일 시간이 문제 시간 제한에 섞이면 안 된다.
         # 실제 프로그램 실행은 컨테이너 내부 timeout으로 제한하고, 바깥 timeout은 Docker hang 방지용으로 넉넉히 둔다.
         completed = subprocess.run(command, input=input_data.encode("utf-8"), capture_output=True, timeout=max(float(time_limit) + 30, 90))
     except FileNotFoundError as exc:
-        return 127, "", f"Docker 명령을 찾을 수 없습니다. worker 컨테이너에 Docker CLI가 설치되어 있는지 확인하세요.\n{exc}", 0, 0, False, "system"
+        return 127, "", f"Docker 명령을 찾을 수 없습니다. worker 컨테이너에 Docker CLI가 설치되어 있는지 확인하세요.\n{exc}", 0, 0, False, False, "system"
     except subprocess.TimeoutExpired:
-        return 125, "", "채점 컨테이너 준비 또는 실행이 비정상적으로 오래 걸렸습니다. Docker 이미지 다운로드/실행 상태를 확인하세요.", 0, 0, False, "system"
+        return 125, "", "채점 컨테이너 준비 또는 실행이 비정상적으로 오래 걸렸습니다. Docker 이미지 다운로드/실행 상태를 확인하세요.", 0, 0, False, False, "system"
     stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
     stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
-    user_stderr, runtime_ms, memory_kb, timed_out = _split_metrics(stderr_text)
+    user_stderr, runtime_ms, memory_kb, timed_out, oom_killed = _split_metrics(stderr_text)
     if runtime_ms <= 0 and language != "python":
         # 메트릭 파싱에 실패한 경우에만 보조값으로 Docker 전체 시간을 사용한다.
         # 정상 경로에서는 컴파일/컨테이너 시작 시간이 제외된 실제 실행 시간만 기록된다.
@@ -271,7 +310,7 @@ def _run_test(language: str, code: str, input_data: str, time_limit: int, memory
         timed_out = completed.returncode == 124
     phase = "compile" if "__OJ_PHASE__compile" in user_stderr or completed.returncode == 101 else "run"
     user_stderr = user_stderr.replace("__OJ_PHASE__compile", "").strip()
-    return completed.returncode, stdout_text, user_stderr, runtime_ms, memory_kb, timed_out, phase
+    return completed.returncode, stdout_text, user_stderr, runtime_ms, memory_kb, timed_out, oom_killed, phase
 
 
 def judge_code(problem_id: int, code: str, language: str, time_limit: int, memory_limit: int) -> tuple[str, str, int, int]:
@@ -285,8 +324,14 @@ def judge_code(problem_id: int, code: str, language: str, time_limit: int, memor
     if not problem_path.exists():
         return "SE", "테스트 케이스 폴더를 찾을 수 없습니다.", 0, 0
     input_files = sorted(problem_path.glob("*.in"), key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
+    output_files = sorted(problem_path.glob("*.out"), key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
     if not input_files:
         return "SE", "테스트 케이스가 없습니다.", 0, 0
+    input_stems = {path.stem for path in input_files}
+    output_stems = {path.stem for path in output_files}
+    orphan_outputs = sorted(output_stems - input_stems)
+    if orphan_outputs:
+        return "SE", "입력 파일 없이 출력 파일만 존재합니다: " + ", ".join(f"{name}.out" for name in orphan_outputs[:10]), 0, 0
     total_runtime_ms = 0
     peak_memory_kb = 0
     for index, input_path in enumerate(input_files, start=1):
@@ -295,9 +340,11 @@ def judge_code(problem_id: int, code: str, language: str, time_limit: int, memor
             return "SE", f"{input_path.name}에 대응하는 출력 파일이 없습니다.", total_runtime_ms, peak_memory_kb
         input_data = input_path.read_text(encoding="utf-8")
         expected_output = output_path.read_text(encoding="utf-8")
-        rc, stdout_text, stderr_text, runtime_ms, memory_kb, timed_out, phase = _run_test(language, code, input_data, time_limit, memory_limit)
+        rc, stdout_text, stderr_text, runtime_ms, memory_kb, timed_out, oom_killed, phase = _run_test(language, code, input_data, time_limit, memory_limit)
         total_runtime_ms += runtime_ms
         peak_memory_kb = max(peak_memory_kb, memory_kb)
+        if _looks_like_memory_limit_exceeded(rc, stderr_text, memory_kb, memory_limit, oom_killed):
+            return "MLE", f"{index}번 테스트에서 메모리 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
         if timed_out or rc == 124 or runtime_ms > int(float(time_limit) * 1000):
             return "TLE", f"{index}번 테스트에서 시간 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
         if phase == "system":

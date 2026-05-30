@@ -13,12 +13,34 @@ class User(Base):
     submit_banned_until = Column(DateTime(timezone=False), nullable=True)
     ban_reason = Column(Text, nullable=True)
     profile_background_url = Column(String(500), nullable=False, default="")
+    profile_image_url = Column(String(500), nullable=False, default="")
+    selected_profile_badge_id = Column(Integer, nullable=False, default=0)
+    selected_profile_background_id = Column(Integer, nullable=False, default=0)
+    profile_message = Column(Text, nullable=False, default="")
     full_name = Column(String(100), nullable=False, default="")
     student_id = Column(String(50), nullable=False, default="")
     must_change_password = Column(Boolean, nullable=False, default=False)
     is_deleted = Column(Boolean, nullable=False, default=False)
     deleted_at = Column(DateTime(timezone=False), nullable=True)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
+    ac_rating = Column(Integer, nullable=False, default=0)
+    ac_tier = Column(Integer, nullable=False, default=0)
+    ac_rating_problem_sum = Column(Integer, nullable=False, default=0)
+    ac_rating_solved_bonus = Column(Integer, nullable=False, default=0)
+    solved_count = Column(Integer, nullable=False, default=0)
+
+
+class AlgorithmTag(Base):
+    __tablename__ = "algorithm_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(80), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    is_active = Column(Boolean, nullable=False, default=True)
+    order_index = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
+
 
 class Problem(Base):
     __tablename__ = "problems"
@@ -30,11 +52,17 @@ class Problem(Base):
     output_description = Column(Text, nullable=False)
     time_limit = Column(Integer, nullable=False, default=2)
     memory_limit = Column(Integer, nullable=False, default=256)
+    python_time_limit = Column(Integer, nullable=True)
+    c_time_limit = Column(Integer, nullable=True)
+    cpp_time_limit = Column(Integer, nullable=True)
+    java_time_limit = Column(Integer, nullable=True)
     is_contest_only = Column(Boolean, nullable=False, default=False)
     is_public = Column(Boolean, nullable=False, default=True)
     force_private_submission = Column(Boolean, nullable=False, default=False)
     is_judge_ready = Column(Boolean, nullable=False, default=True)
     difficulty = Column(String(50), nullable=False, default="미지정")
+    tier = Column(Integer, nullable=False, default=0)
+    judge_priority = Column(Integer, nullable=False, default=0)
     tags = Column(String(255), nullable=False, default="")
     source = Column(String(200), nullable=False, default="")
     problem_author = Column(String(200), nullable=False, default="")
@@ -90,6 +118,8 @@ class Contest(Base):
     hide_ranking = Column(Boolean, nullable=False, default=False)
     result_display_mode = Column(String(30), nullable=False, default="full")
     score_enabled = Column(Boolean, nullable=False, default=False)
+    scoreboard_freeze_enabled = Column(Boolean, nullable=False, default=False)
+    scoreboard_freeze_minutes = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     problem_links = relationship("ContestProblem", back_populates="contest", cascade="all, delete-orphan", order_by="ContestProblem.order_index")
@@ -384,3 +414,20 @@ class BoardComment(Base):
 
     post = relationship("BoardPost")
     author = relationship("User")
+
+
+class ProfileAsset(Base):
+    __tablename__ = "profile_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset_type = Column(String(30), nullable=False, default="badge")  # badge / background
+    title = Column(String(120), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    image_url = Column(String(500), nullable=False, default="")
+    icon_text = Column(String(50), nullable=False, default="")
+    condition_type = Column(String(30), nullable=False, default="single")  # single / all / any
+    condition_problem_ids = Column(Text, nullable=False, default="")
+    condition_value = Column(String(120), nullable=False, default="")
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=False), server_default=func.now())

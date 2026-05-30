@@ -189,7 +189,7 @@ def create_group_contest(
     )
     # 관계를 직접 연결해 두어 라우트에서 group_contest.contest가 None으로 보이는 문제를 방지한다.
     contest.is_exam_mode = bool(is_exam_mode)
-    contest.hide_ranking = bool(hide_ranking or is_exam_mode)
+    contest.hide_ranking = bool(hide_ranking)
     contest.is_public = bool(is_public)
     contest.result_display_mode = "full"
     link = GroupContest(group_id=group.id, contest_id=contest.id, title=title, description=description, contest=contest)

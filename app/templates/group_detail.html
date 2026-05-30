@@ -3,9 +3,11 @@
 <section class="box">
     <h2>{{ group.name }}</h2>
     {{ group.description|rich_text }}
-    <p><b>소유자:</b> {{ display_username(group.owner) }}</p>
+    <p><b>소유자:</b> {% if group.owner and not group.owner.is_deleted %}<a class="username-link" href="/users/{{ group.owner.username }}">{{ display_username(group.owner) }}</a>{% else %}{{ display_username(group.owner) }}{% endif %}</p>
     <p><b>공개 여부:</b> {{ "공개" if group.is_public else "비공개" }}</p>
     <p><b>학교 분반 그룹:</b> {{ "활성화" if group.is_school_group else "미활성화" }}{% if group.school_group_request_status == "pending" %} <span class="hint">(승인 대기 중)</span>{% elif group.school_group_request_status == "rejected" %} <span class="hint">(최근 신청 거절)</span>{% endif %}</p>
+    {% if invite_error %}<div class="error-box">{{ invite_error }}</div>{% endif %}
+    {% if invite_message %}<div class="info-box">{{ invite_message }}</div>{% endif %}
     {% if can_manage %}
     <details class="sub-box">
         <summary>그룹 설명 / 공개 여부 수정</summary>
@@ -109,7 +111,7 @@
                 {% if member.user and not member.user.is_deleted and not member.user.is_admin %}
                 <tr class="group-member-row" data-username="{{ (member.user.username if member.user else member.user_id)|string|lower }}" data-full-name="{{ (member.user.full_name if member.user else '')|lower }}" data-student-id="{{ (member.user.student_id if member.user else '')|lower }}" data-has-full-name="{{ '1' if member.user and member.user.full_name else '0' }}" data-has-student-id="{{ '1' if member.user and member.user.student_id else '0' }}">
                     {% if can_manage %}<td>{% if member.user_id != group.owner_id %}<input type="checkbox" name="member_ids" value="{{ member.user_id }}" form="memberBulkForm">{% endif %}</td>{% endif %}
-                    <td>{{ display_username(member.user) }}</td>
+                    <td>{% if member.user and not member.user.is_deleted %}<a class="username-link" href="/users/{{ member.user.username }}">{{ display_username(member.user) }}</a>{% else %}{{ display_username(member.user) }}{% endif %}</td>
                     <td>{{ member.user.full_name if member.user else '-' }}</td>
                     <td>{{ member.user.student_id if member.user else '-' }}</td>
                     <td>{{ "소유자" if member.role == "owner" else ("관리자" if member.role == "admin" else "회원") }}</td>
@@ -146,9 +148,9 @@
             <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-role" onclick="return confirm('선택한 회원의 역할을 변경할까요?');">선택 역할 변경</button>
             {% if can_school_group_member_admin %}
             <input type="text" name="new_password" form="memberBulkForm" value="changeme1234" placeholder="초기화 비밀번호">
-            <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-reset-password" onclick="return confirm('선택한 회원의 비밀번호를 초기화할까요?');">선택 비밀번호 초기화</button>
+            <button type="submit" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-reset-password" onclick="return confirmDanger(document.getElementById('memberBulkForm'), '일괄 초기화하겠습니다', '선택한 회원의 비밀번호를 초기화합니다.');">선택 비밀번호 초기화</button>
             {% endif %}
-            <button type="submit" class="danger-button" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-delete" onclick="return confirm('선택한 회원을 그룹에서 제거할까요?');">선택 회원 제거</button>
+            <button type="submit" class="danger-button" form="memberBulkForm" formaction="/groups/{{ group.id }}/members/bulk-delete" onclick="return confirmDanger(document.getElementById('memberBulkForm'), '탈퇴 처리하겠습니다', '선택한 회원을 그룹에서 제거합니다.');">선택 회원 제거</button>
         </div>
         {% endif %}
     </details>
@@ -174,7 +176,7 @@ student02"></textarea>
         </form>
         <hr>
         <p class="hint">승인된 학교 분반 그룹에서는 그룹 소유자/관리자/OJ 관리자가 계정을 생성하면서 그룹에 일괄 추가할 수 있습니다.</p>
-        <form action="/groups/{{ group.id }}/members/bulk-create" method="post" enctype="multipart/form-data">
+        <form action="/groups/{{ group.id }}/members/bulk-create" method="post" enctype="multipart/form-data" onsubmit="return confirmDanger(this, '일괄 생성하겠습니다', 'CSV 내용대로 그룹 회원 계정을 일괄 생성합니다.');">
             <input type="file" name="csv_file" accept=".csv,text/csv">
             <p class="hint">또는 아래에 직접 붙여넣을 수 있습니다.</p>
             <textarea name="csv_text" class="short-code-textarea" placeholder="username,password,full_name,student_id
@@ -190,7 +192,7 @@ student01,1234,홍길동,10101"></textarea>
         <summary>가입 신청 관리</summary>
         {% for req in join_requests %}
         <div class="question-card">
-            <p>{{ display_username(req.user) }} / {{ req.created_at }}</p>
+            <p>{% if req.user and not req.user.is_deleted %}<a class="username-link" href="/users/{{ req.user.username }}">{{ display_username(req.user) }}</a>{% else %}{{ display_username(req.user) }}{% endif %} / {{ req.created_at|kst_time }}</p>
             <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/approve" method="post"><button type="submit">승인</button></form>
             <form class="inline-actions" action="/groups/{{ group.id }}/join-requests/{{ req.id }}/reject" method="post"><button type="submit">거절</button></form>
         </div>
@@ -288,6 +290,9 @@ student01,1234,홍길동,10101"></textarea>
             {% endif %}
             <label><input type="checkbox" name="hide_ranking"> 순위표 숨김</label>
             <label><input type="checkbox" name="score_enabled"> 문제별 배점 기능 사용</label>
+            <label><input type="checkbox" name="scoreboard_freeze_enabled"> 스코어보드 프리즈 사용</label>
+            <label>프리즈 시작 시점</label><input type="number" name="scoreboard_freeze_minutes" value="60" min="0" max="10080">
+            <p class="hint">대회 종료 전 입력한 분부터 일반 참가자 순위표 갱신을 멈춥니다. 대회가 끝나면 최종 순위표가 공개됩니다.</p>
             <p class="hint">배점 기능을 켜면 문제별 점수 입력과 점수표 기능을 사용할 수 있습니다.</p>
             <p class="hint">상세 채점 메시지는 관리자에게만 보이고, 일반 참가자는 실행시간과 메모리만 확인할 수 있습니다.</p>
             <p class="hint">비워두면 문제 없는 그룹 대회가 먼저 생성됩니다. 생성 후 대회 상세 화면에서 기존 문제를 추가할 수 있습니다.</p>
@@ -337,7 +342,7 @@ student01,1234,홍길동,10101"></textarea>
                         <button type="submit">저장</button>
                     </form>
                     {% endif %}
-                    <form action="/groups/{{ group.id }}/contests/{{ item.id }}/delete" method="post" class="inline-actions" onsubmit="return confirm('이 그룹 대회와 관련 제출/질문/에디토리얼을 삭제할까요?');">
+                    <form action="/groups/{{ group.id }}/contests/{{ item.id }}/delete" method="post" class="inline-actions" onsubmit="return confirmDanger(this, '대회를 삭제하겠습니다', '이 그룹 대회와 관련 제출/질문/에디토리얼을 삭제합니다.');">
                         <button type="submit" class="danger">삭제</button>
                     </form>
                     {% else %}-{% endif %}
@@ -371,7 +376,7 @@ student01,1234,홍길동,10101"></textarea>
         <tr>
             <td>{{ item.title }}</td>
             <td>{{ item.description|rich_text }}</td>
-            <td>{{ item.start_time if item.start_time else '제한 없음' }} ~ {{ item.end_time if item.end_time else '제한 없음' }}</td>
+            <td>{{ item.start_time|plain_time if item.start_time else '제한 없음' }} ~ {{ item.end_time|plain_time if item.end_time else '제한 없음' }}</td>
             <td>{{ practice_items.get(item.id, [])|length }}개</td>
             <td>{% if practice_is_closed(item) %}종료{% elif practice_is_open(item) %}진행 중{% else %}시작 전{% endif %}</td>
             <td><a class="button secondary" href="/groups/{{ group.id }}/practices/{{ item.id }}">입장</a></td>
@@ -414,8 +419,8 @@ student01,1234,홍길동,10101"></textarea>
             <td>{{ post.display_number or loop.index }}</td>
             <td>{{ GROUP_BOARD_TYPES.get(post.board_type, post.board_type) }}</td>
             <td><a href="/groups/{{ group.id }}/board/{{ post.id }}">{{ post.title }}</a></td>
-            <td>{{ display_username(post.author) }}</td>
-            <td>{{ post.created_at }}</td>
+            <td>{% if post.author and not post.author.is_deleted %}<a class="username-link" href="/users/{{ post.author.username }}">{{ display_username(post.author) }}</a>{% else %}{{ display_username(post.author) }}{% endif %}</td>
+            <td>{{ post.created_at|kst_time }}</td>
         </tr>
         {% else %}<tr><td colspan="5">그룹 게시글이 없습니다.</td></tr>{% endfor %}
         </tbody>

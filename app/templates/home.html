@@ -1,39 +1,185 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero box">
-    <h2>온라인 저지</h2>
-    <p>이 곳에서 알고리즘 문제를 풀고, 채점 받으며 알고리즘 공부를 할 수 있습니다.</p>
-    <div class="hero-actions">
-        <a class="button" href="/problems">문제 풀기</a>
-        <a class="button secondary" href="/contests">대회 보기</a>
-        <a class="button secondary" href="/boards/all">공지사항</a>
+{% set selected_recommendation = recommended_problems[0] if recommended_problems else None %}
+<section class="home-hero-main">
+    <div class="interactive-card home-hero-card">
+        <div class="home-system-pill"><span class="pulse-dot"></span> 채점 시스템 정상 · 워커 4개 활성</div>
+        <h2 class="home-slogan">THINK.<br>SOLVE.<br><span>GROW.</span></h2>
+        <p class="home-copy">문제를 풀고, 대회를 운영하고, 성장 기록을 확인하는 교육용 온라인 저지입니다.</p>
+        <div class="hero-actions home-hero-actions-spaced">
+            <a class="button hero-primary" href="/problems">문제 풀러가기 <span>›</span></a>
+            <a class="button hero-secondary" href="/contests">진행 중 대회 보기</a>
+            {% if user and user.is_admin %}<a class="button hero-secondary" href="/admin">관리자 페이지</a>{% endif %}
+        </div>
+
+        <div class="home-judge-flow" id="front-queue-card">
+            <div class="flow-orbit"></div>
+            <button class="flow-node active" type="button">
+                <div class="flow-cube flow-cube-queue"></div>
+                <span>Queue</span>
+                <b data-waiting-count>{{ queue_status.waiting.count }}개</b>
+                <small>우선순위 대기</small>
+            </button>
+            <button class="flow-node" type="button">
+                <div class="flow-cube flow-cube-worker"></div>
+                <span>Worker</span>
+                <b>4/4</b>
+                <small>일반 3 · 재채점 1</small>
+            </button>
+            <span data-normal-count hidden>실행 {{ queue_status.normal.running }} · 대기 {{ queue_status.normal.queued }}</span>
+            <span data-rejudge-count hidden>실행 {{ queue_status.rejudge.running }} · 대기 {{ queue_status.rejudge.queued }}</span>
+            <span data-queue-health hidden>정상</span>
+            <span data-normal-bar hidden></span>
+            <span data-rejudge-bar hidden></span>
+            <span data-waiting-bar hidden></span>
+        </div>
+    </div>
+
+    <div class="home-side-stack">
+        <div class="home-stat-grid" data-home-status-counts>
+            <div class="interactive-card home-stat-card">
+                <div class="home-glass-icon home-icon-cyan"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9l-4 3 4 3"/><path d="M16 9l4 3-4 3"/><path d="M14 5l-4 14"/></svg></div>
+                <span>채점 가능한 문제</span>
+                <b data-judgeable-problems>{{ judgeable_problem_count }}</b>
+            </div>
+            <div class="interactive-card home-stat-card">
+                <div class="home-glass-icon home-icon-emerald"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg></div>
+                <span>오늘 제출</span>
+                <b data-today-submissions>{{ today_submission_count }}</b>
+            </div>
+            <div class="interactive-card home-stat-card">
+                <div class="home-glass-icon home-icon-violet"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01M8 17h.01"/></svg></div>
+                <span>채점 워커</span>
+                <b>4/4</b>
+            </div>
+            <div class="interactive-card home-stat-card">
+                <div class="home-glass-icon home-icon-yellow"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+                <span>현재 접속자 수</span>
+                <b data-online-users>{{ online_user_count }}</b>
+            </div>
+        </div>
+
+        <section class="interactive-card home-side-card">
+            <div class="home-card-title">
+                <div><span>CONTEST</span><h3>대회 목록</h3></div>
+                <div class="home-title-icon home-icon-yellow"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0V4z"/><path d="M5 5H3v3a4 4 0 0 0 4 4"/><path d="M19 5h2v3a4 4 0 0 1-4 4"/></svg></div>
+            </div>
+            <div class="home-list-stack">
+                {% for contest in recent_contests %}
+                <a class="home-row-card" href="/contests/{{ contest.id }}">
+                    <div>
+                        <b>{{ contest.title }}</b>
+                        <small>{{ contest.start_time|plain_time }} ~ {{ contest.end_time|plain_time }}</small>
+                    </div>
+                    <span>{% if contest.start_time <= now and contest.end_time >= now %}진행 중{% else %}예정{% endif %}</span>
+                </a>
+                {% else %}
+                <div class="home-row-card empty-row"><b>진행 중인 대회가 없습니다</b></div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="interactive-card home-side-card">
+            <div class="home-card-title"><div><span>PROFILE</span><h3>내 프로필</h3></div></div>
+            {% if user and profile_summary %}
+                <div class="home-profile-tier tier-text tier-{{ profile_tier_class }}">{{ profile_summary.tier_name }}</div>
+                <div class="home-profile-rating">{{ profile_summary.rating }}</div>
+                <div class="home-rating-bar"><span style="width:{{ profile_progress.percent }}%"></span></div>
+                <div class="home-profile-progress-text">{{ profile_progress.next_tier_name }} 까지 {{ profile_progress.remaining }} rating</div>
+            {% else %}
+                <p class="home-muted">로그인하면 레이팅과 티어가 표시됩니다.</p>
+            {% endif %}
+        </section>
     </div>
 </section>
 
-<div class="dashboard-grid">
-    <section class="box">
-        <h3>공지사항</h3>
-        {% for post in notices %}
-        <p><a href="/boards/posts/{{ post.id }}">{{ post.title }}</a><br><span class="hint">{{ post.created_at }} · {{ display_username(post.author) }}</span></p>
-        {% else %}<p class="hint">등록된 공지사항이 없습니다.</p>{% endfor %}
+{% if user %}
+<section class="home-grid-secondary">
+    <section class="interactive-card home-recommend-card">
+        <div class="home-section-title">
+            <div><h3>추천 문제</h3><p>해결한 문제 중 가장 높은 티어보다 한 단계 높은 문제까지 추천</p></div>
+            <a class="button secondary" href="/problems">전체 보기</a>
+        </div>
+        <div class="home-list-stack">
+            {% for item in recommended_problems %}
+            <button class="home-problem-row home-recommend-button{% if loop.first %} active{% endif %}" type="button"
+                    data-recommend-problem
+                    data-url="/problems/{{ item.problem.id }}"
+                    data-id="{{ item.problem.id }}"
+                    data-title="{{ item.problem.title|e }}"
+                    data-tag="{{ item.tag|e }}"
+                    data-tier-name="{{ tier_name(item.problem.tier)|e }}"
+                    data-tier-class="tier-{{ tier_group(item.problem.tier) }}"
+                    data-match="{{ item.match|e }}"
+                    data-solved="{{ item.solved_count }}"
+                    data-statement="{{ problem_statement_excerpt(item.problem)|e }}">
+                <div>
+                    <span>#{{ item.problem.id }} · {{ item.tag }}</span>
+                    <b>{{ item.problem.title }}</b>
+                </div>
+                <div class="home-problem-tier">{{ tier_badge(item.problem.tier) }}<small>{{ item.match }}</small></div>
+            </button>
+            {% else %}
+            <div class="home-row-card empty-row"><b>추천할 문제가 없습니다</b></div>
+            {% endfor %}
+        </div>
     </section>
-    <section class="box">
-        <h3>최근 게시글</h3>
-        {% for post in board_posts %}
-        <p><span class="badge">{{ BOARD_TYPES.get(post.board_type, post.board_type) }}</span> <a href="/boards/posts/{{ post.id }}">{{ post.title }}</a></p>
-        {% else %}<p class="hint">등록된 게시글이 없습니다.</p>{% endfor %}
+
+    <section class="interactive-card home-preview-card" data-recommend-preview>
+        <div class="home-section-title"><h3>선택한 문제</h3><span class="home-title-icon home-icon-cyan"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span></div>
+        {% if selected_recommendation %}
+            <div class="home-selected-problem-card">
+                <span class="home-selected-meta" data-preview-meta>#{{ selected_recommendation.problem.id }} · {{ selected_recommendation.tag }}</span>
+                <h3 data-preview-title>{{ selected_recommendation.problem.title }}</h3>
+                <div class="home-selected-tier" data-preview-tier>{{ tier_badge(selected_recommendation.problem.tier) }}</div>
+                <p data-preview-reason>추천 이유: {{ selected_recommendation.match }}</p>
+                <div class="home-selected-statement" data-preview-statement>{{ problem_statement_excerpt(selected_recommendation.problem) }}</div>
+                <div class="home-selected-meta-row">해결 {{ selected_recommendation.solved_count }}명</div>
+                <a class="button hero-primary home-selected-link" data-preview-link href="/problems/{{ selected_recommendation.problem.id }}">문제 풀러가기 <span>›</span></a>
+            </div>
+        {% else %}
+            <div class="home-row-card empty-row"><b>추천할 문제가 없습니다</b></div>
+        {% endif %}
     </section>
-    <section class="box">
-        <h3>최근 문제</h3>
-        {% for problem in recent_problems %}
-        <p><a href="/problems/{{ problem.id }}">{{ problem.id }}. {{ problem.title }}</a></p>
-        {% else %}<p class="hint">등록된 문제가 없습니다.</p>{% endfor %}
+</section>
+{% endif %}
+
+<section class="home-grid-secondary home-bottom-grid">
+    <section class="interactive-card home-submission-log-card">
+        <div class="home-section-title"><h3>실시간 제출 로그</h3><span class="home-title-icon home-icon-emerald"><svg class="home-icon-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 8-6-16-3 8H2"/></svg></span></div>
+        <div class="home-list-stack" data-live-submission-log>
+            {% for log in recent_submission_logs %}
+            <div class="home-row-card">
+                <b>{% if log.user_profile_url %}<a class="username-link" href="{{ log.user_profile_url }}">{{ log.username }}</a>{% else %}{{ log.username }}{% endif %} · <a class="home-row-main-link" href="/submissions/{{ log.id }}">{{ log.problem_id }} · {{ log.result }}</a></b>
+                <small>{{ log.problem_title }}</small>
+            </div>
+            {% else %}
+            <div class="home-row-card empty-row"><b>아직 제출이 없습니다</b></div>
+            {% endfor %}
+        </div>
     </section>
-    <section class="box">
-        <h3>최근 대회</h3>
-        {% for contest in recent_contests %}
-        <p><a href="/contests/{{ contest.id }}">{{ contest.title }}</a><br><span class="hint">{{ contest.start_time }} ~ {{ contest.end_time }}</span></p>
-        {% else %}<p class="hint">등록된 대회가 없습니다.</p>{% endfor %}
+
+    <section class="interactive-card home-tabs-card">
+        <div class="home-tabs" role="tablist">
+            <button type="button" class="active" data-home-tab="notice"><span class="home-tab-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13V7a2 2 0 0 1 2-2h2l8-3v18l-8-3H6a2 2 0 0 1-2-2v-2zm14-5.5a4.5 4.5 0 0 1 0 9"/></svg></span>공지사항</button>
+            <button type="button" data-home-tab="posts"><span class="home-tab-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H8l-3 3V5zm4 4h6m-6 3h4"/></svg></span>최근 게시글</button>
+            <button type="button" data-home-tab="problems"><span class="home-tab-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zm7 11l.9 2.6L22 18l-2.1.7L19 21l-.9-2.3L16 18l2.1-1.4L19 14z"/></svg></span>최근 추가된 문제</button>
+        </div>
+        <div class="home-tab-panel active" data-home-panel="notice">
+            {% for post in notices %}
+            <a class="home-row-card" href="/boards/posts/{{ post.id }}"><b>{{ post.title }}</b><small>{{ post.created_at|kst_time }} · {{ display_username(post.author) }}</small></a>
+            {% else %}<div class="home-row-card empty-row"><b>등록된 공지사항이 없습니다</b></div>{% endfor %}
+        </div>
+        <div class="home-tab-panel" data-home-panel="posts">
+            {% for post in board_posts %}
+            <a class="home-row-card" href="/boards/posts/{{ post.id }}"><b>{{ post.title }}</b><small>{{ BOARD_TYPES.get(post.board_type, post.board_type) }} · {{ display_username(post.author) }}</small></a>
+            {% else %}<div class="home-row-card empty-row"><b>등록된 게시글이 없습니다</b></div>{% endfor %}
+        </div>
+        <div class="home-tab-panel" data-home-panel="problems">
+            {% for problem in recent_problems[:3] %}
+            <a class="home-problem-row" href="/problems/{{ problem.id }}"><div><span>#{{ problem.id }}</span><b>{{ problem.title }}</b></div>{{ tier_badge(problem.tier) }}</a>
+            {% else %}<div class="home-row-card empty-row"><b>최근 추가된 문제가 없습니다</b></div>{% endfor %}
+        </div>
     </section>
-</div>
+</section>
 {% endblock %}
