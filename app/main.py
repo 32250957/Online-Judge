@@ -18,7 +18,7 @@ from typing import Optional
 from markupsafe import Markup, escape
 
 from fastapi import FastAPI, Depends, Request, Form, HTTPException, UploadFile, File, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -29,7 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database import SessionLocal, engine, Base
 from app.schema import ensure_postgresql_schema
 from app.models import User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment, ProfileAsset
-from app.security import hash_password, verify_password
+from app.security import hash_password, password_hash_needs_upgrade, verify_password
 from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES, effective_time_limit_for_language
 from app.services.domain import (
     create_contest_with_problems,
@@ -64,6 +64,9 @@ BACKUP_RESTORE_CONFIRM_TEXT = "복구합니다"
 ACTIVE_VISITORS: dict[str, float] = {}
 ACTIVE_VISITOR_TTL_SECONDS = int(os.getenv("ACTIVE_VISITOR_TTL_SECONDS", "60"))
 ACTIVE_VISITOR_SESSION_KEY = "active_visitor_id"
+MAX_IMAGE_UPLOAD_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(5 * 1024 * 1024)))
+MAX_PRIVATE_ATTACHMENT_BYTES = int(os.getenv("MAX_PRIVATE_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(20 * 1024 * 1024)))
 
 
 def ensure_active_visitor_id(request: Request) -> str:
@@ -126,10 +129,10 @@ def validate_username_value(username: str) -> str | None:
 
 
 def validate_password_value(password: str) -> str | None:
-    if not (8 <= len(password) <= 20):
-        return "비밀번호는 8자 이상 20자 이하로 입력해야 합니다."
-    if ACCOUNT_ALLOWED_PATTERN.fullmatch(password) is None:
-        return "비밀번호에는 " + ACCOUNT_ALLOWED_HINT
+    if not (8 <= len(password) <= 128):
+        return "비밀번호는 8자 이상 128자 이하로 입력해야 합니다."
+    if "\x00" in password:
+        return "비밀번호에는 널 문자를 사용할 수 없습니다."
     return None
 
 
@@ -501,34 +504,48 @@ def profile_asset_condition_text(asset: ProfileAsset) -> str:
     return f"문제 {joined} 해결" if ids else "조건 미설정"
 
 
-def save_profile_asset_upload(file: UploadFile | None) -> str:
+def read_limited_upload(file: UploadFile, max_bytes: int, label: str) -> bytes:
+    data = file.file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"{label} 파일은 {max_bytes // (1024 * 1024)}MB 이하만 업로드할 수 있습니다.")
+    if not data:
+        raise HTTPException(status_code=400, detail=f"비어 있는 {label} 파일은 업로드할 수 없습니다.")
+    return data
+
+
+def detect_image_suffix(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def save_validated_image_upload(file: UploadFile | None, target_dir: Path, filename_prefix: str = "") -> str:
     if not file or not file.filename:
         return ""
-    suffix = Path(file.filename).suffix.lower()
-    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
-    if suffix not in allowed:
-        raise HTTPException(status_code=400, detail="이미지 파일만 업로드할 수 있습니다. png, jpg, webp, gif, svg를 사용하세요.")
-    filename = f"{uuid.uuid4().hex}{suffix}"
-    target = Path("uploads/profile_assets") / filename
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
-    return f"/uploads/profile_assets/{filename}"
+    data = read_limited_upload(file, MAX_IMAGE_UPLOAD_BYTES, "이미지")
+    suffix = detect_image_suffix(data)
+    if suffix is None:
+        raise HTTPException(status_code=400, detail="실제 PNG, JPG, GIF, WEBP 이미지 파일만 업로드할 수 있습니다.")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{filename_prefix}{uuid.uuid4().hex}{suffix}"
+    (target_dir / filename).write_bytes(data)
+    return filename
+
+
+def save_profile_asset_upload(file: UploadFile | None) -> str:
+    filename = save_validated_image_upload(file, Path("uploads/profile_assets"))
+    return f"/uploads/profile_assets/{filename}" if filename else ""
 
 def save_user_profile_upload(file: UploadFile | None, kind: str) -> str:
-    if not file or not file.filename:
-        return ""
-    suffix = Path(file.filename).suffix.lower()
-    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-    if suffix not in allowed:
-        raise HTTPException(status_code=400, detail="프로필 이미지는 png, jpg, webp, gif 파일만 업로드할 수 있습니다.")
     safe_kind = "background" if kind == "background" else "avatar"
-    filename = f"{safe_kind}_{uuid.uuid4().hex}{suffix}"
-    target = Path("uploads/profiles") / filename
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
-    return f"/uploads/profiles/{filename}"
+    filename = save_validated_image_upload(file, Path("uploads/profiles"), f"{safe_kind}_")
+    return f"/uploads/profiles/{filename}" if filename else ""
 
 def build_user_profile_context(db: Session, request: Request, viewer: User | None, target: User, **extra) -> dict:
     submissions = db.query(Submission).filter(Submission.user_id == target.id, Submission.contest_id.is_(None)).order_by(Submission.id.desc()).all()
@@ -837,7 +854,9 @@ Path("uploads/editorials").mkdir(parents=True, exist_ok=True)
 Path("uploads/school_group_requests").mkdir(parents=True, exist_ok=True)
 Path("uploads/profile_assets").mkdir(parents=True, exist_ok=True)
 Path("uploads/profiles").mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/uploads/editorials", StaticFiles(directory="uploads/editorials"), name="editorial_uploads")
+app.mount("/uploads/profile_assets", StaticFiles(directory="uploads/profile_assets"), name="profile_asset_uploads")
+app.mount("/uploads/profiles", StaticFiles(directory="uploads/profiles"), name="profile_uploads")
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -926,6 +945,16 @@ def result_label(result: str | None) -> str:
     return RESULT_LABELS.get(result, result)
 
 templates.env.globals["result_label"] = result_label
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 @app.middleware("http")
@@ -2330,23 +2359,9 @@ def contest_editorial_visible_to(user: Optional[User], contest: Contest, editori
 
 
 def save_editorial_image(file: UploadFile | None, contest_id: int, problem_id: int) -> str:
-    if file is None or not file.filename:
-        return ""
-    content_type = (file.content_type or "").lower()
-    allowed_content_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-    suffix = Path(file.filename).suffix.lower()
-    allowed_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    if content_type not in allowed_content_types and suffix not in allowed_suffixes:
-        raise HTTPException(status_code=400, detail="이미지 파일만 업로드할 수 있습니다. PNG, JPG, GIF, WEBP를 사용하세요.")
-    if suffix not in allowed_suffixes:
-        suffix = ".png"
     target_dir = Path("uploads/editorials") / str(contest_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"problem_{problem_id}_{uuid.uuid4().hex}{suffix}"
-    target = target_dir / filename
-    with target.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
-    return "/" + str(target).replace("\\", "/")
+    filename = save_validated_image_upload(file, target_dir, f"problem_{problem_id}_")
+    return f"/uploads/editorials/{contest_id}/{filename}" if filename else ""
 
 
 def is_allowed_during_school_exam(lock: dict, path: str, method: str) -> bool:
@@ -2426,6 +2441,13 @@ async def no_store_private_pages_middleware(request: Request, call_next):
 @app.middleware("http")
 async def csrf_protection_middleware(request: Request, call_next):
     if request.method.upper() in UNSAFE_HTTP_METHODS:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                    return HTMLResponse("요청 본문이 너무 큽니다.", status_code=413)
+            except ValueError:
+                return HTMLResponse("잘못된 Content-Length 헤더입니다.", status_code=400)
         expected = request.session.get(CSRF_SESSION_KEY)
         supplied = request.headers.get("X-CSRF-Token")
 
@@ -2955,6 +2977,8 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     user = db.query(User).filter(User.username == username).first()
     if user is None or getattr(user, "is_deleted", False) or not verify_password(password, user.password_hash):
         return templates.TemplateResponse("login.html", {"request": request, "user": None, "error": "아이디 또는 비밀번호가 올바르지 않습니다."})
+    if password_hash_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(password)
     old_csrf_token = request.session.get(CSRF_SESSION_KEY)
     old_active_visitor_id = request.session.get(ACTIVE_VISITOR_SESSION_KEY)
     if old_active_visitor_id:
@@ -4466,10 +4490,12 @@ def admin_security_create_admin(
 ):
     admin = require_admin(request, db)
     username = username.strip()
-    if len(username) < 3:
-        raise HTTPException(status_code=400, detail="아이디는 3자 이상이어야 합니다.")
-    if len(password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다.")
+    username_error = validate_username_value(username)
+    if username_error:
+        raise HTTPException(status_code=400, detail=username_error)
+    password_error = validate_password_value(password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     if db.query(User).filter(User.username == username).first() is not None:
         raise HTTPException(status_code=400, detail="이미 사용 중인 아이디입니다.")
     target = User(
@@ -5724,6 +5750,32 @@ def handle_group_join_request(group_id: int, request_id: int, action: str, reque
     return RedirectResponse(url=f"/groups/{group.id}#overview", status_code=303)
 
 
+@app.get("/groups/{group_id}/school-group/attachment")
+def download_school_group_attachment(group_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_login(request, db)
+    group = db.query(Group).filter(Group.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    require_group_owner_or_site_admin(user, group)
+    stored_value = group.school_group_request_file_path or ""
+    # Compatibility with rows created before private attachment routing was added.
+    if stored_value.startswith("/uploads/school_group_requests/"):
+        stored_value = stored_value.lstrip("/")
+    stored_path = Path(stored_value)
+    allowed_root = Path("uploads/school_group_requests").resolve()
+    try:
+        resolved_path = stored_path.resolve(strict=True)
+        resolved_path.relative_to(allowed_root)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return FileResponse(
+        resolved_path,
+        filename=group.school_group_request_file_name or resolved_path.name,
+        media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+    )
+
+
 @app.post("/groups/{group_id}/school-group/apply")
 def apply_school_group(group_id: int, request: Request, reason: str = Form(""), attachment: UploadFile | None = File(None), db: Session = Depends(get_db)):
     user = require_login(request, db)
@@ -5739,9 +5791,8 @@ def apply_school_group(group_id: int, request: Request, reason: str = Form(""), 
         safe_name = safe_upload_filename(attachment.filename)
         stored_name = f"group_{group.id}_{uuid.uuid4().hex}_{safe_name}"
         stored_path = Path("uploads/school_group_requests") / stored_name
-        with stored_path.open("wb") as out:
-            shutil.copyfileobj(attachment.file, out)
-        group.school_group_request_file_path = f"/uploads/school_group_requests/{stored_name}"
+        stored_path.write_bytes(read_limited_upload(attachment, MAX_PRIVATE_ATTACHMENT_BYTES, "첨부"))
+        group.school_group_request_file_path = str(stored_path)
         group.school_group_request_file_name = safe_name
     admins = db.query(User).filter(User.is_admin == True).all()  # noqa: E712
     for admin in admins:

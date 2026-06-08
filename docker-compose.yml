@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: oj
-      POSTGRES_PASSWORD: ojpass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: ojdb
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,10 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      OJ_BOOTSTRAP_ADMIN_USERNAME: ${OJ_BOOTSTRAP_ADMIN_USERNAME:-}
+      OJ_BOOTSTRAP_ADMIN_PASSWORD: ${OJ_BOOTSTRAP_ADMIN_PASSWORD:-}
     volumes:
       - ./problems:/app/problems
     command: python init_db.py
@@ -37,7 +40,10 @@ services:
       init:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      SESSION_SECRET_KEY: ${SESSION_SECRET_KEY:?Set SESSION_SECRET_KEY}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-0}
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_C_IMAGE: oj-gcc:13
       OJ_CPP_IMAGE: oj-gcc:13
@@ -68,7 +74,8 @@ services:
       judge-images:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_C_IMAGE: oj-gcc:13
       OJ_CPP_IMAGE: oj-gcc:13
@@ -89,7 +96,8 @@ services:
       judge-images:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_C_IMAGE: oj-gcc:13
       OJ_CPP_IMAGE: oj-gcc:13
@@ -110,7 +118,8 @@ services:
       judge-images:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_C_IMAGE: oj-gcc:13
       OJ_CPP_IMAGE: oj-gcc:13
@@ -131,7 +140,8 @@ services:
       judge-images:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg2://oj:ojpass@db:5432/ojdb
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       OJ_PYTHON_IMAGE: python:3.11-slim
       OJ_C_IMAGE: oj-gcc:13
       OJ_CPP_IMAGE: oj-gcc:13
