@@ -48,7 +48,7 @@
             <textarea name="reason" class="short-textarea" placeholder="예: 1학년 정보 수행평가 분반 운영용">{{ group.school_group_request_reason }}</textarea>
             <label>증빙 파일</label><input type="file" name="attachment">
             <p class="hint">수업 계획서, 분반 명단, 담당자 확인 자료 등을 첨부할 수 있습니다.</p>
-            {% if group.school_group_request_file_path %}<p class="hint">현재 첨부: <a href="{{ group.school_group_request_file_path }}" target="_blank">{{ group.school_group_request_file_name or '첨부파일' }}</a></p>{% endif %}
+            {% if group.school_group_request_file_path %}<p class="hint">현재 첨부: <a href="/groups/{{ group.id }}/school-group/attachment" target="_blank">{{ group.school_group_request_file_name or '첨부파일' }}</a></p>{% endif %}
             <button type="submit">신청하기</button>
         </form>
     </details>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from app.database import SessionLocal, engine
@@ -12,11 +13,22 @@ ensure_postgresql_schema(engine)
 
 db = SessionLocal()
 try:
-    default_admin_username = "geumyeom"
-    default_admin_password = "Ojgeumyeom9853"
-    admin = db.query(User).filter(User.username == default_admin_username).first()
-    if admin is None:
-        db.add(User(username=default_admin_username, password_hash=hash_password(default_admin_password), is_admin=True))
+    bootstrap_username = os.getenv("OJ_BOOTSTRAP_ADMIN_USERNAME", "").strip()
+    bootstrap_password = os.getenv("OJ_BOOTSTRAP_ADMIN_PASSWORD", "")
+    if bool(bootstrap_username) != bool(bootstrap_password):
+        raise RuntimeError("OJ_BOOTSTRAP_ADMIN_USERNAME and OJ_BOOTSTRAP_ADMIN_PASSWORD must be set together")
+    if bootstrap_username:
+        if len(bootstrap_password) < 12:
+            raise RuntimeError("OJ_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters")
+        admin = db.query(User).filter(User.username == bootstrap_username).first()
+        if admin is None:
+            db.add(User(
+                username=bootstrap_username,
+                password_hash=hash_password(bootstrap_password),
+                is_admin=True,
+                must_change_password=True,
+            ))
+            print(f"Bootstrap admin account created: {bootstrap_username} (password change required)")
 
     problems_path = Path("problems")
     if problems_path.exists():
@@ -30,16 +42,10 @@ try:
 
             if problem is None:
                 problem = Problem(
-                    id=meta["id"],
-                    title=meta["title"],
-                    description=meta["description"],
-                    input_description=meta["input_description"],
-                    output_description=meta["output_description"],
-                    time_limit=meta["time_limit"],
-                    memory_limit=meta["memory_limit"],
-                    is_contest_only=False,
-                    is_public=True,
-                    is_judge_ready=True,
+                    id=meta["id"], title=meta["title"], description=meta["description"],
+                    input_description=meta["input_description"], output_description=meta["output_description"],
+                    time_limit=meta["time_limit"], memory_limit=meta["memory_limit"], is_contest_only=False,
+                    is_public=True, is_judge_ready=True,
                     allowed_languages=meta.get("allowed_languages", "python,c,cpp,java"),
                 )
                 db.add(problem)
@@ -61,4 +67,3 @@ finally:
     db.close()
 
 print("PostgreSQL database initialized.")
-print("Admin account: geumyeom / Ojgeumyeom9853")
