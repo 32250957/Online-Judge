@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import time
+import selectors
+import uuid
 from pathlib import Path
 
 DOCKER_CPUS = os.getenv("OJ_DOCKER_CPUS", "1")
@@ -13,6 +15,7 @@ PYTHON_IMAGE = os.getenv("OJ_PYTHON_IMAGE", "python:3.11-slim")
 C_IMAGE = os.getenv("OJ_C_IMAGE", "oj-gcc:13")
 CPP_IMAGE = os.getenv("OJ_CPP_IMAGE", "oj-gcc:13")
 JAVA_IMAGE = os.getenv("OJ_JAVA_IMAGE", "eclipse-temurin:17")
+MAX_OUTPUT_BYTES = max(1024, int(os.getenv("OJ_MAX_OUTPUT_BYTES", str(1024 * 1024))))
 
 SUPPORTED_LANGUAGES = {
     "python": {"label": "Python 3", "image": PYTHON_IMAGE},
@@ -76,16 +79,18 @@ with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         f.write(code)
     started_at = time.perf_counter()
     try:
-        completed = subprocess.run([sys.executable, main_path], input=input_data, capture_output=True, timeout=time_limit)
+        child = subprocess.Popen([sys.executable, main_path], stdin=subprocess.PIPE,
+                                 stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+        child.communicate(input=input_data, timeout=time_limit)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)
         memory_kb = int(getattr(usage, "ru_maxrss", 0))
-        metrics = {"runtime_ms": elapsed_ms, "memory_kb": memory_kb, "timed_out": False, "oom_killed": completed.returncode in (137, -9)}
-        sys.stdout.buffer.write(completed.stdout)
-        sys.stderr.buffer.write(completed.stderr)
+        metrics = {"runtime_ms": elapsed_ms, "memory_kb": memory_kb, "timed_out": False, "oom_killed": child.returncode in (137, -9)}
         sys.stderr.write("\n__OJ_METRICS__" + json.dumps(metrics, ensure_ascii=False) + "\n")
-        raise SystemExit(completed.returncode)
+        raise SystemExit(child.returncode)
     except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         metrics = {"runtime_ms": elapsed_ms, "memory_kb": 0, "timed_out": True, "oom_killed": False}
         sys.stderr.write("\n__OJ_METRICS__" + json.dumps(metrics, ensure_ascii=False) + "\n")
@@ -264,11 +269,77 @@ def _base_docker_command(image: str, memory_limit: int) -> list[str]:
         "docker", "run", "--rm", "-i",
         "--network", "none",
         "--memory", f"{int(memory_limit)}m",
+        "--memory-swap", f"{int(memory_limit)}m",
         "--cpus", DOCKER_CPUS,
         "--pids-limit", DOCKER_PIDS_LIMIT,
         "--read-only",
         "--tmpfs", "/tmp:rw,exec,nosuid,size=128m",
     ]
+
+
+class OutputLimitExceeded(Exception):
+    pass
+
+
+def _bounded_run(command: list[str], input_data: bytes, timeout: float):
+    """Stream both output pipes with a strict combined cap; never buffer unbounded output."""
+    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as process:
+        stdout, stderr = bytearray(), bytearray()
+        pending = memoryview(input_data)
+        deadline = time.monotonic() + timeout
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+                if pending:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE)
+                else:
+                    process.stdin.close()
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        stream = key.fileobj
+                        if stream is process.stdin:
+                            try:
+                                size = os.write(stream.fileno(), pending[:65536])
+                                pending = pending[size:]
+                            except BrokenPipeError:
+                                pending = pending[len(pending):]
+                            except BlockingIOError:
+                                continue
+                            if not pending:
+                                selector.unregister(stream)
+                                stream.close()
+                            continue
+                        try:
+                            chunk = os.read(stream.fileno(), 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(stream)
+                            continue
+                        if len(stdout) + len(stderr) + len(chunk) > MAX_OUTPUT_BYTES:
+                            raise OutputLimitExceeded()
+                        (stdout if stream is process.stdout else stderr).extend(chunk)
+                process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
+
+
+def _remove_container(container_name: str) -> None:
+    try:
+        subprocess.run(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _run_test(language: str, code: str, input_data: str, time_limit: int, memory_limit: int) -> tuple[int, str, str, int, int, bool, bool, str]:
@@ -292,22 +363,25 @@ def _run_test(language: str, code: str, input_data: str, time_limit: int, memory
         ]
     else:
         return 127, "", f"지원하지 않는 언어입니다: {language}", 0, 0, False, False, "system"
+    container_name = "oj-run-" + uuid.uuid4().hex
+    command[2:2] = ["--name", container_name, "--log-driver", "none"]
     try:
         # 컴파일 언어는 컨테이너 시작/컴파일 시간이 문제 시간 제한에 섞이면 안 된다.
         # 실제 프로그램 실행은 컨테이너 내부 timeout으로 제한하고, 바깥 timeout은 Docker hang 방지용으로 넉넉히 둔다.
-        completed = subprocess.run(command, input=input_data.encode("utf-8"), capture_output=True, timeout=max(float(time_limit) + 30, 90))
+        completed = _bounded_run(command, input_data.encode("utf-8"), max(float(time_limit) + 30, 90))
     except FileNotFoundError as exc:
         return 127, "", f"Docker 명령을 찾을 수 없습니다. worker 컨테이너에 Docker CLI가 설치되어 있는지 확인하세요.\n{exc}", 0, 0, False, False, "system"
     except subprocess.TimeoutExpired:
         return 125, "", "채점 컨테이너 준비 또는 실행이 비정상적으로 오래 걸렸습니다. Docker 이미지 다운로드/실행 상태를 확인하세요.", 0, 0, False, False, "system"
+    except OutputLimitExceeded:
+        return 1, "", "출력 제한을 초과했습니다.", 0, 0, False, False, "output"
+    finally:
+        _remove_container(container_name)
     stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
     stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
     user_stderr, runtime_ms, memory_kb, timed_out, oom_killed = _split_metrics(stderr_text)
-    if runtime_ms <= 0 and language != "python":
-        # 메트릭 파싱에 실패한 경우에만 보조값으로 Docker 전체 시간을 사용한다.
-        # 정상 경로에서는 컴파일/컨테이너 시작 시간이 제외된 실제 실행 시간만 기록된다.
-        runtime_ms = int((time.perf_counter() - started) * 1000)
-        timed_out = completed.returncode == 124
+    if completed.returncode in {125, 126, 127} and "__OJ_METRICS__" not in stderr_text:
+        return completed.returncode, "", stderr_text or "채점 컨테이너 실행 오류입니다.", 0, 0, False, False, "system"
     phase = "compile" if "__OJ_PHASE__compile" in user_stderr or completed.returncode == 101 else "run"
     user_stderr = user_stderr.replace("__OJ_PHASE__compile", "").strip()
     return completed.returncode, stdout_text, user_stderr, runtime_ms, memory_kb, timed_out, oom_killed, phase
@@ -343,14 +417,16 @@ def judge_code(problem_id: int, code: str, language: str, time_limit: int, memor
         rc, stdout_text, stderr_text, runtime_ms, memory_kb, timed_out, oom_killed, phase = _run_test(language, code, input_data, time_limit, memory_limit)
         total_runtime_ms += runtime_ms
         peak_memory_kb = max(peak_memory_kb, memory_kb)
-        if _looks_like_memory_limit_exceeded(rc, stderr_text, memory_kb, memory_limit, oom_killed):
-            return "MLE", f"{index}번 테스트에서 메모리 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
-        if timed_out or rc == 124 or runtime_ms > int(float(time_limit) * 1000):
-            return "TLE", f"{index}번 테스트에서 시간 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
         if phase == "system":
             return "SE", stderr_text.strip() or "채점 시스템 오류가 발생했습니다.", total_runtime_ms, peak_memory_kb
         if phase == "compile":
             return "CE", f"컴파일 에러가 발생했습니다.\n{stderr_text}", total_runtime_ms, peak_memory_kb
+        if phase == "output":
+            return "RE", stderr_text, total_runtime_ms, peak_memory_kb
+        if _looks_like_memory_limit_exceeded(rc, stderr_text, memory_kb, memory_limit, oom_killed):
+            return "MLE", f"{index}번 테스트에서 메모리 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
+        if timed_out or rc == 124 or runtime_ms > int(float(time_limit) * 1000):
+            return "TLE", f"{index}번 테스트에서 시간 초과가 발생했습니다.", total_runtime_ms, peak_memory_kb
         if rc != 0:
             error = stderr_text.strip() or f"return code: {rc}"
             return "RE", f"{index}번 테스트에서 런타임 에러가 발생했습니다.\n{error}", total_runtime_ms, peak_memory_kb
@@ -363,3 +439,4 @@ def judge_code(problem_id: int, code: str, language: str, time_limit: int, memor
 
 def judge_python(problem_id: int, code: str, time_limit: int, memory_limit: int) -> tuple[str, str, int, int]:
     return judge_code(problem_id, code, "python", time_limit, memory_limit)
+

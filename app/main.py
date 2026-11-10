@@ -11,6 +11,7 @@ import subprocess
 import zipfile
 import uuid
 import time
+import tempfile
 from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -27,7 +28,8 @@ from sqlalchemy import func, or_, and_, text, case, DateTime
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import SessionLocal, engine, Base
-from app.schema import ensure_postgresql_schema
+from app.schema import ensure_postgresql_schema, repair_serial_sequences
+from app.time_utils import local_to_utc, utc_naive
 from app.models import User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment, ProfileAsset
 from app.security import hash_password, password_hash_needs_upgrade, verify_password
 from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES, effective_time_limit_for_language
@@ -67,6 +69,8 @@ ACTIVE_VISITOR_SESSION_KEY = "active_visitor_id"
 MAX_IMAGE_UPLOAD_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_PRIVATE_ATTACHMENT_BYTES = int(os.getenv("MAX_PRIVATE_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
 MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(20 * 1024 * 1024)))
+SUBMIT_INTERVAL_SECONDS = max(0, int(os.getenv("OJ_SUBMIT_INTERVAL_SECONDS", "2")))
+MAX_PENDING_SUBMISSIONS = max(1, int(os.getenv("OJ_MAX_PENDING_SUBMISSIONS", "3")))
 
 
 def ensure_active_visitor_id(request: Request) -> str:
@@ -1600,7 +1604,7 @@ def _hydrate_cached_rankings(db: Session, cached_rows: list[dict]) -> list[dict]
 def contest_elapsed_minutes(contest: Contest, submitted_at: datetime | None) -> int:
     if submitted_at is None:
         return 0
-    seconds = (submitted_at - contest.start_time).total_seconds()
+    seconds = (utc_naive(submitted_at) - local_to_utc(contest.start_time)).total_seconds()
     return max(0, int(seconds // 60))
 
 
@@ -1649,7 +1653,7 @@ def build_contest_rankings(db: Session, contest: Contest, freeze_cutoff: datetim
         .filter(Submission.contest_id == contest.id)
     )
     if freeze_cutoff is not None:
-        submissions_query = submissions_query.filter(Submission.created_at < freeze_cutoff)
+        submissions_query = submissions_query.filter(Submission.created_at < local_to_utc(freeze_cutoff))
     submissions = submissions_query.order_by(Submission.created_at.asc(), Submission.id.asc()).all()
     by_user: dict[int, dict] = {}
     for submission in submissions:
@@ -1678,7 +1682,7 @@ def build_contest_rankings(db: Session, contest: Contest, freeze_cutoff: datetim
             row["total_score"] += int(link.score or 0)
             row["cells"][submission.problem_id] = "+" if wrong == 0 else f"+{wrong}"
             row["best_ac"][submission.problem_id] = (ac_time, wrong, submission.id)
-        elif submission.result not in final_pending_results:
+        elif submission.result not in final_pending_results | {"SE", "CE"}:
             row["wrong_before_ac"][submission.problem_id] = row["wrong_before_ac"].get(submission.problem_id, 0) + 1
             row["cells"][submission.problem_id] = f"-{row['wrong_before_ac'][submission.problem_id]}"
 
@@ -1972,6 +1976,8 @@ def judge_priority_for_submission(db: Session | None, submission: Submission) ->
 
 
 def enqueue_submission(submission: Submission, reason: str = "채점 대기 중입니다.", db: Session | None = None, job_type: str = "judge") -> JudgeJob | None:
+    if db is not None:
+        db.query(Submission).filter(Submission.id == submission.id).with_for_update().one()
     submission.result = "WAITING"
     submission.judge_status = "PENDING"
     submission.detail = reason
@@ -2170,6 +2176,47 @@ def can_view_submission(user: Optional[User], submission: Optional[Submission]) 
     if user and user.is_admin:
         return True
     return bool(user and submission.user_id == user.id)
+
+
+def visible_submissions_query(db: Session, user: Optional[User]):
+    """Apply the same result visibility to lists, home, detail and status APIs."""
+    query = db.query(Submission)
+    if user and user.is_admin:
+        return query
+    group_ids = set()
+    if user:
+        group_ids.update(row[0] for row in db.query(GroupMember.group_id).filter(GroupMember.user_id == user.id))
+        group_ids.update(row[0] for row in db.query(Group.id).filter(Group.owner_id == user.id))
+    visible_ids = []
+    freeze_conditions = []
+    grouped = {}
+    for link in db.query(GroupContest).all():
+        grouped.setdefault(link.contest_id, []).append(link.group_id)
+    for contest in db.query(Contest).all():
+        if (not contest.is_public or contest.hide_ranking or not contest_has_started(contest)
+                or any(gid not in group_ids for gid in grouped.get(contest.id, []))):
+            continue
+        visible_ids.append(contest.id)
+        cutoff = scoreboard_freeze_cutoff_for_user(user, contest)
+        if cutoff is not None:
+            freeze_conditions.append(or_(Submission.contest_id != contest.id,
+                                         Submission.created_at < local_to_utc(cutoff)))
+    normal = and_(
+        Submission.contest_id.is_(None),
+        Submission.problem.has(and_(Problem.is_public == True, Problem.is_contest_only == False)),
+        or_(Submission.practice_id.is_(None),
+            Submission.practice.has(GroupPractice.group_id.in_(group_ids))),
+    )
+    contest_result = and_(Submission.contest_id.in_(visible_ids), *freeze_conditions)
+    own = Submission.user_id == user.id if user else False
+    return query.filter(or_(own, normal, contest_result))
+
+
+def require_visible_submission(db: Session, user: Optional[User], submission_id: int):
+    submission = visible_submissions_query(db, user).filter(Submission.id == submission_id).first()
+    if submission is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return submission
 
 
 def collect_permission_summary(db: Session) -> list[dict]:
@@ -2407,7 +2454,11 @@ async def school_exam_lock_middleware(request: Request, call_next):
     db = SessionLocal()
     try:
         user = get_current_user(request, db)
-        lock = get_active_school_exam_lock(db, user)
+        if user and user.must_change_password and path not in {"/change-password", "/logout"}:
+            if request.method.upper() == "GET":
+                return RedirectResponse(url="/change-password", status_code=303)
+            return HTMLResponse("비밀번호를 변경한 뒤 이용해 주세요.", status_code=403)
+        lock = None if user and user.must_change_password else get_active_school_exam_lock(db, user)
         if lock is not None and not is_allowed_during_school_exam(lock, path, request.method):
             target = f"/contests/{lock['contest'].id}"
             if request.method.upper() == "GET":
@@ -2541,9 +2592,9 @@ def build_practice_board(db: Session, practice: GroupPractice, members: list[Gro
                     Submission.contest_id.is_(None),
                 )
                 if practice.start_time:
-                    fallback_query = fallback_query.filter(Submission.created_at >= practice.start_time)
+                    fallback_query = fallback_query.filter(Submission.created_at >= local_to_utc(practice.start_time))
                 if practice.end_time:
-                    fallback_query = fallback_query.filter(Submission.created_at <= practice.end_time)
+                    fallback_query = fallback_query.filter(Submission.created_at <= local_to_utc(practice.end_time))
                 submissions = fallback_query.order_by(Submission.id.asc()).all()
 
             attempts = 0
@@ -2579,8 +2630,8 @@ def home_today_submission_count(db: Session) -> int:
     return db.query(Submission).filter(Submission.created_at >= today_start()).count()
 
 
-def home_recent_submission_logs(db: Session, limit: int = 4) -> list[dict]:
-    submissions = db.query(Submission).options(joinedload(Submission.user), joinedload(Submission.problem)).order_by(Submission.id.desc()).limit(limit).all()
+def home_recent_submission_logs(db: Session, user: Optional[User] = None, limit: int = 4) -> list[dict]:
+    submissions = visible_submissions_query(db, user).options(joinedload(Submission.user), joinedload(Submission.problem)).order_by(Submission.id.desc()).limit(limit).all()
     logs = []
     for submission in submissions:
         username = display_username(submission.user) if submission.user else "guest"
@@ -2712,7 +2763,7 @@ def site_home(request: Request, db: Session = Depends(get_db)):
         "recent_contests": recent_contests,
         "notices": notices,
         "board_posts": board_posts,
-        "recent_submission_logs": home_recent_submission_logs(db),
+        "recent_submission_logs": home_recent_submission_logs(db, user),
         "judgeable_problem_count": judgeable_problem_query(db, user).count(),
         "today_submission_count": home_today_submission_count(db),
         "online_user_count": count_active_visitors(),
@@ -2737,7 +2788,7 @@ def front_queue_status(db: Session) -> dict:
         "normal": {"queued": queued_judge, "running": running_judge, "width": min(100, round(((queued_judge + running_judge) / total) * 100))},
         "rejudge": {"queued": queued_rejudge, "running": running_rejudge, "width": min(100, round(((queued_rejudge + running_rejudge) / total) * 100))},
         "waiting": {"count": waiting_submissions, "width": min(100, round((waiting_submissions / total) * 100))},
-        "healthy": True,
+        "healthy": _active_worker_count(db) > 0,
     }
 
 
@@ -2776,7 +2827,7 @@ def api_home_status(request: Request, db: Session = Depends(get_db)):
         "today_submission_count": home_today_submission_count(db),
         "online_user_count": count_active_visitors(),
         "queue": front_queue_status(db),
-        "recent_submissions": home_recent_submission_logs(db),
+        "recent_submissions": home_recent_submission_logs(db, user),
     }
 
 
@@ -3052,6 +3103,15 @@ def problem_detail(problem_id: int, request: Request, db: Session = Depends(get_
 @app.post("/submit")
 def submit(request: Request, problem_id: int = Form(...), language: str = Form(...), code: str = Form(...), visibility: str = Form("private"), contest_id: int | None = Form(None), practice_id: int | None = Form(None), db: Session = Depends(get_db)):
     user = require_login(request, db)
+    # Lock the account so simultaneous requests cannot bypass per-user limits.
+    db.query(User).filter(User.id == user.id).with_for_update().one()
+    if not user.is_admin:
+        pending = db.query(Submission).filter(Submission.user_id == user.id, Submission.judge_status.in_(["PENDING", "JUDGING"])).count()
+        latest = db.query(Submission.created_at).filter(Submission.user_id == user.id).order_by(Submission.id.desc()).first()
+        if pending >= MAX_PENDING_SUBMISSIONS:
+            raise HTTPException(status_code=429, detail="대기 중인 제출이 많습니다. 채점 완료 후 다시 제출해 주세요.")
+        if latest and (utc_now() - utc_naive(latest[0])).total_seconds() < SUBMIT_INTERVAL_SECONDS:
+            raise HTTPException(status_code=429, detail="제출 간격이 너무 짧습니다. 잠시 후 다시 제출해 주세요.")
     language = normalize_language(language)
     validate_submission_payload(language, code)
     current = now()
@@ -3115,6 +3175,7 @@ def submit(request: Request, problem_id: int = Form(...), language: str = Form(.
         judge_status="PENDING",
         detail="채점 대기 중입니다.",
         visibility=visibility,
+        created_at=utc_now(),
     )
     db.add(submission)
     db.flush()
@@ -3128,7 +3189,7 @@ def submit(request: Request, problem_id: int = Form(...), language: str = Form(.
 
 def render_submissions_page(request: Request, db: Session, only_mine: bool):
     user = require_login(request, db) if only_mine else get_current_user(request, db)
-    query = db.query(Submission)
+    query = visible_submissions_query(db, user)
     if only_mine:
         query = query.filter(Submission.user_id == user.id)
 
@@ -3332,9 +3393,7 @@ def my_submissions(request: Request, db: Session = Depends(get_db)):
 @app.get("/submissions/{submission_id}", response_class=HTMLResponse)
 def submission_detail(submission_id: int, request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
-    submission = db.query(Submission).filter(Submission.id == submission_id).first()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="Submission not found")
+    submission = require_visible_submission(db, user, submission_id)
     exam_lock = get_active_school_exam_lock(db, user)
     if exam_lock is not None and submission.contest_id != exam_lock["contest"].id:
         raise HTTPException(status_code=403, detail="학교 분반 그룹 시험 모드 진행 중에는 해당 시험 제출만 확인할 수 있습니다.")
@@ -3362,7 +3421,10 @@ def requeue_stuck_judging_submissions(db: Session, minutes: int = 10, actor: str
         if job.submission_id in seen_submission_ids:
             continue
         seen_submission_ids.add(job.submission_id)
-        submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
+        submission = db.query(Submission).filter(Submission.id == job.submission_id).with_for_update().populate_existing().first()
+        db.refresh(job, with_for_update=True)
+        if job.status != "RUNNING":
+            continue
         job.status = "FAILED"
         job.finished_at = utc_now()
         job.error_message = "stuck job auto requeued"
@@ -3417,6 +3479,9 @@ def requeue_single_judge_job(db: Session, job_id: int, actor: str = "admin") -> 
 
 def cancel_single_judge_job(db: Session, job_id: int, actor: str = "admin") -> bool:
     job = db.query(JudgeJob).filter(JudgeJob.id == job_id).first()
+    if job is not None:
+        db.query(Submission).filter(Submission.id == job.submission_id).with_for_update().first()
+        db.refresh(job, with_for_update=True)
     if job is None or job.status not in {"QUEUED", "RUNNING"}:
         return False
     job.status = "CANCELED"
@@ -3465,7 +3530,7 @@ def api_submission_status_bulk(ids: str, request: Request, db: Session = Depends
     wanted = wanted[:100]
     if not wanted:
         return {"submissions": []}
-    submissions = db.query(Submission).filter(Submission.id.in_(wanted)).all()
+    submissions = visible_submissions_query(db, user).filter(Submission.id.in_(wanted)).all()
     exam_lock = get_active_school_exam_lock(db, user)
     rows = []
     for submission in submissions:
@@ -3479,20 +3544,20 @@ def api_submission_status_bulk(ids: str, request: Request, db: Session = Depends
 @app.get("/api/submissions/{submission_id}/events")
 def api_submission_events(submission_id: int, request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
-    submission = db.query(Submission).filter(Submission.id == submission_id).first()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="Submission not found")
+    submission = require_visible_submission(db, user, submission_id)
     exam_lock = get_active_school_exam_lock(db, user)
     if exam_lock is not None and submission.contest_id != exam_lock["contest"].id:
         raise HTTPException(status_code=403, detail="학교 분반 그룹 시험 모드 진행 중에는 해당 시험 제출만 확인할 수 있습니다.")
     detail_visible = can_view_submission_detail_message(user, submission)
+
+    db.close()  # Streaming responses must not retain the dependency connection.
 
     def event_stream():
         last_payload = None
         for _ in range(180):
             local_db = SessionLocal()
             try:
-                current = local_db.query(Submission).filter(Submission.id == submission_id).first()
+                current = visible_submissions_query(local_db, get_current_user(request, local_db)).filter(Submission.id == submission_id).first()
                 if current is None:
                     yield "event: error\ndata: {\"error\": \"not_found\"}\n\n"
                     break
@@ -3513,9 +3578,7 @@ def api_submission_events(submission_id: int, request: Request, db: Session = De
 @app.get("/api/submissions/{submission_id}/status")
 def api_submission_status(submission_id: int, request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
-    submission = db.query(Submission).filter(Submission.id == submission_id).first()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="Submission not found")
+    submission = require_visible_submission(db, user, submission_id)
     exam_lock = get_active_school_exam_lock(db, user)
     if exam_lock is not None and submission.contest_id != exam_lock["contest"].id:
         raise HTTPException(status_code=403, detail="학교 분반 그룹 시험 모드 진행 중에는 해당 시험 제출만 확인할 수 있습니다.")
@@ -4048,7 +4111,7 @@ def collect_system_checks(db: Session) -> dict:
     queued_jobs = db.query(JudgeJob).filter(JudgeJob.status == "QUEUED").count()
     running_jobs = db.query(JudgeJob).filter(JudgeJob.status == "RUNNING").count()
     failed_jobs = current_failed_job_count(db)
-    recent_24h = now() - timedelta(hours=24)
+    recent_24h = utc_now() - timedelta(hours=24)
     heartbeat_cutoff = utc_now() - timedelta(minutes=2)
     recent_heartbeats = db.query(JudgeLog).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= heartbeat_cutoff).all()
     docker_cli_found = shutil.which("docker") is not None
@@ -4195,40 +4258,75 @@ def list_saved_backups():
     return sorted(backups, key=lambda item: item["name"], reverse=True)
 
 
+def replace_directory_contents(source: Path, target: Path) -> None:
+    """Keep bind mount roots in place; replace only their children."""
+    target.mkdir(parents=True, exist_ok=True)
+    for child in target.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    shutil.copytree(source, target, dirs_exist_ok=True)
+
+
 def restore_backup_zip(db: Session, backup_bytes: bytes) -> None:
-    with zipfile.ZipFile(io.BytesIO(backup_bytes), "r") as zf:
+    # Validate JSON and archive paths completely before touching DB or live files.
+    with tempfile.TemporaryDirectory(prefix="oj-restore-") as temp, zipfile.ZipFile(io.BytesIO(backup_bytes), "r") as zf:
         if "manifest.json" not in zf.namelist():
             raise ValueError("manifest.json이 없는 백업 파일입니다.")
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         if manifest.get("type") not in {"online_judge_full_backup", "online_judge_basic_backup"}:
             raise ValueError("지원하지 않는 백업 형식입니다.")
-        missing = [f"db/{model.__tablename__}.json" for model in BACKUP_MODEL_LIST if f"db/{model.__tablename__}.json" not in zf.namelist()]
-        if missing:
-            raise ValueError("백업에 일부 DB 테이블 데이터가 없습니다: " + ", ".join(missing[:5]))
+        # Guard against expansion of a small ZIP into an unbounded restore tree.
+        if sum(info.file_size for info in zf.infolist()) > 1024 * 1024 * 1024:
+            raise ValueError("압축 해제한 백업은 1GB 이하여야 합니다.")
+        model_by_table = {model.__tablename__: model for model in BACKUP_MODEL_LIST}
+        restored = {}
+        for table in Base.metadata.sorted_tables:
+            model = model_by_table[table.name]
+            raw_rows = json.loads(zf.read(f"db/{table.name}.json").decode("utf-8"))
+            if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
+                raise ValueError(f"잘못된 테이블 데이터: {table.name}")
+            restored[table.name] = [
+                {column.name: coerce_model_value(column, row[column.name])
+                 for column in table.columns if column.name in row}
+                for row in raw_rows
+            ]
+        staged = Path(temp)
+        folders = ("problems", "uploads")
+        for name in folders:
+            (staged / name).mkdir()
+            safe_extract_prefix(zf, name, staged / name)
 
-        # DB 복구: FK 순서 문제를 피하기 위해 전체 테이블을 한 번에 TRUNCATE CASCADE 처리합니다.
-        table_names = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
-        db.execute(text(f"TRUNCATE {table_names} RESTART IDENTITY CASCADE"))
-        for model in BACKUP_MODEL_LIST:
-            rows = json.loads(zf.read(f"db/{model.__tablename__}.json").decode("utf-8"))
-            for row in rows:
-                data = {}
-                for column in model.__table__.columns:
-                    if column.name in row:
-                        data[column.name] = coerce_model_value(column, row[column.name])
-                db.add(model(**data))
-        db.commit()
-
-        # 파일 복구: 기존 폴더는 safety copy로 보존한 뒤 백업 파일로 교체합니다.
-        stamp = now().strftime("%Y%m%d_%H%M%S")
-        restore_safety_dir = BACKUP_DIR / f"before_restore_files_{stamp}"
-        restore_safety_dir.mkdir(parents=True, exist_ok=True)
-        for folder_name in ["problems", "uploads"]:
-            folder = Path(folder_name)
-            if folder.exists():
-                shutil.move(str(folder), str(restore_safety_dir / folder_name))
-            folder.mkdir(parents=True, exist_ok=True)
-            safe_extract_prefix(zf, folder_name, folder)
+        # Do not restore while workers can write results or read changing test files.
+        heartbeat_cutoff = utc_now() - timedelta(minutes=2)
+        if db.query(JudgeLog.id).filter(JudgeLog.event == "heartbeat", JudgeLog.created_at >= heartbeat_cutoff).first():
+            raise ValueError("채점 워커를 모두 중지한 뒤 마지막 heartbeat에서 2분 후 복구해 주세요.")
+        safety = BACKUP_DIR / ("before_restore_files_" + uuid.uuid4().hex)
+        safety.mkdir(parents=True)
+        for name in folders:
+            Path(name).mkdir(parents=True, exist_ok=True)
+            shutil.copytree(Path(name), safety / name)
+        changed = []
+        try:
+            table_names = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+            # Preserve old sequences until data insertion and file replacement succeed.
+            db.execute(text(f"TRUNCATE {table_names} CONTINUE IDENTITY CASCADE"))
+            for table in Base.metadata.sorted_tables:
+                for row in restored[table.name]:
+                    db.execute(table.insert().values(**row))
+            for name in folders:
+                changed.append(name)
+                replace_directory_contents(staged / name, Path(name))
+            repair_serial_sequences(db.connection())
+            db.commit()
+        except BaseException:
+            db.rollback()
+            for name in reversed(changed):
+                replace_directory_contents(safety / name, Path(name))
+            raise
+        db.expire_all()
+        RANKING_CACHE.clear()
 
 
 @app.get("/admin/diagnostics", response_class=HTMLResponse)
@@ -5959,6 +6057,16 @@ def create_group_contest_shell(group_id: int, request: Request, title: str = For
         exam_enabled = is_exam_mode == "on"
         ensure_exam_mode_allowed_for_group(group, exam_enabled)
         if linked_contest_id is not None:
+            linked_contest = db.query(Contest).filter(Contest.id == linked_contest_id).first()
+            if linked_contest is None:
+                raise HTTPException(status_code=404, detail="Contest not found")
+            if not user.is_admin:
+                existing = db.query(GroupContest).filter(GroupContest.contest_id == linked_contest_id, GroupContest.group_id == group.id).first()
+                if existing is None:
+                    raise HTTPException(status_code=403, detail="기존 대회 연결은 OJ 관리자만 할 수 있습니다.")
+            other = db.query(GroupContest).filter(GroupContest.contest_id == linked_contest_id, GroupContest.group_id != group.id).first()
+            if other is not None:
+                raise HTTPException(status_code=400, detail="이미 다른 그룹에 연결된 대회입니다.")
             group_contest = link_existing_contest_to_group(db, group=group, contest_id=linked_contest_id, title=title, description=description)
             if not getattr(group_contest, "display_number", 0):
                 group_contest.display_number = next_group_contest_display_number(db, group.id)
@@ -6003,6 +6111,9 @@ def create_group_contest_shell(group_id: int, request: Request, title: str = For
         if not getattr(group_contest, "display_number", 0):
             group_contest.display_number = next_group_contest_display_number(db, group.id)
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except LookupError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc))
@@ -7261,4 +7372,5 @@ def admin_delete_user(user_id: int, request: Request, confirm_text: str = Form(.
     delete_user_account(db, target)
     db.commit()
     return RedirectResponse(url="/admin/users", status_code=303)
+
 
