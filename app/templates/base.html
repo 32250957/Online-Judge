@@ -5,6 +5,7 @@
     <title>Online Judge</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/static/style.css?v=38_6_39">
+    <link rel="stylesheet" href="/static/site-appearance.css?v=1">
     <script>
         window.MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
@@ -18,7 +19,9 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 </head>
-<body class="interactive-theme">
+<body class="interactive-theme{% if site_appearance.theme == 'pepero' %} event-theme event-pepero event-{{ site_appearance.color_mode }}{% if not site_appearance.motion_enabled %} event-still{% endif %}{% endif %}">
+{% include "partials/pepero_background.html" %}
+{% if appearance_preview %}<div class="appearance-preview-notice" role="status">디자인 미리보기 · 실제 사이트에는 아직 적용되지 않습니다.</div>{% endif %}
 <div class="oj-bg" aria-hidden="true">
     <div class="oj-bg-base"></div>
     <div class="oj-bg-light oj-bg-light-main"></div>
@@ -28,7 +31,7 @@
     <div class="oj-bg-orb orb-purple"></div>
     <div class="oj-bg-grid"></div>
 </div>
-<header>
+<header{% if appearance_preview %} inert{% endif %}>
     <div class="header-inner">
         <h1><a href="/">Online Judge</a></h1>
         <nav>
@@ -54,11 +57,13 @@
         </nav>
     </div>
 </header>
-<main>
+<main{% if appearance_preview %} inert{% endif %}>
     {% block content %}{% endblock %}
 </main>
 <script src="/static/admin-danger-confirm.js"></script>
-<script src="/static/interactive-theme.js?v=38_6_39"></script>
+<script src="/static/interactive-theme.js?v=event_appearance_1"></script>
+<script id="site-appearance-config" type="application/json">{{ dict(site_appearance, preview=appearance_preview)|tojson }}</script>
+<script src="/static/site-appearance.js?v=1"></script>
 <script>
 window.addEventListener('pageshow', function(event) {
     if (event.persisted) {

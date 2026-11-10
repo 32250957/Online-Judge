@@ -35,6 +35,8 @@ jobs:
           docker build -f Dockerfile.gcc -t oj-gcc:13 .
           docker pull eclipse-temurin:17
       - run: python -m pytest -q
+      - name: Check live design scheduling
+        run: node --test tests/site_appearance_browser.test.cjs
       - name: Check that judge containers were removed
         if: always()
         run: test -z "$(docker ps -aq --filter name=oj-run-)"

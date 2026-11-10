@@ -1,7 +1,20 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint, CheckConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
+
+class SiteAppearance(Base):
+    """One site-wide design schedule. All timestamps are UTC, like logs."""
+    __tablename__ = "site_appearance"
+    __table_args__ = (CheckConstraint("id = 1", name="site_appearance_singleton"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=False, default=1)
+    theme = Column(String(30), nullable=False, default="default")
+    color_mode = Column(String(10), nullable=False, default="light")
+    motion_enabled = Column(Boolean, nullable=False, default=True)
+    starts_at = Column(DateTime(timezone=False), nullable=True)
+    ends_at = Column(DateTime(timezone=False), nullable=True)
+
 
 class User(Base):
     __tablename__ = "users"
