@@ -24,6 +24,7 @@ else:
         database=os.getenv("DB_NAME", "ojdb"),
     )
 
-engine = create_engine(database_target, pool_pre_ping=True)
+engine = create_engine(database_target, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+

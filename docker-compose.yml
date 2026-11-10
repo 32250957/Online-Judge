@@ -54,6 +54,7 @@ services:
       - ./problems:/app/problems
       - ./uploads:/app/uploads
       - ./judge_work:/tmp/oj_judge_work
+      - ./backups:/app/backups
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   judge-images:
@@ -157,3 +158,4 @@ services:
 
 volumes:
   postgres_data:
+

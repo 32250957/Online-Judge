@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import traceback
+import threading
 from datetime import datetime, timezone
 from app.database import SessionLocal
 from app.models import Submission, Problem, JudgeJob, JudgeLog
@@ -70,33 +71,27 @@ def _claim_next_job(db) -> JudgeJob | None:
         .filter(~Submission.id.in_(db.query(JudgeJob.submission_id).filter(JudgeJob.status.in_(["QUEUED", "RUNNING"]))))
         .order_by(Submission.id.asc())
         .limit(20)
+        .with_for_update(skip_locked=True)
         .all()
     )
     for submission in orphan:
+        if db.query(JudgeJob.id).filter(JudgeJob.submission_id == submission.id,
+                                       JudgeJob.status.in_(["QUEUED", "RUNNING"])).first():
+            continue
         problem = submission.problem or db.query(Problem).filter(Problem.id == submission.problem_id).first()
         priority = int(getattr(problem, "judge_priority", 0) or 0)
         db.add(JudgeJob(submission_id=submission.id, job_type="judge", status="QUEUED", priority=priority, created_at=utc_now()))
     if orphan:
         db.commit()
 
-    try:
-        job_row = (
-            db.query(JudgeJob.id)
-            .filter(JudgeJob.status == "QUEUED")
-            .filter(JudgeJob.job_type.in_(WORKER_JOB_TYPES))
-            .order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
-            .with_for_update(skip_locked=True)
-            .first()
-        )
-    except Exception:
-        db.rollback()
-        job_row = (
-            db.query(JudgeJob.id)
-            .filter(JudgeJob.status == "QUEUED")
-            .filter(JudgeJob.job_type.in_(WORKER_JOB_TYPES))
-            .order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
-            .first()
-        )
+    job_row = (
+        db.query(JudgeJob.id)
+        .filter(JudgeJob.status == "QUEUED")
+        .filter(JudgeJob.job_type.in_(WORKER_JOB_TYPES))
+        .order_by(JudgeJob.priority.desc(), JudgeJob.id.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
     if job_row is None:
         return None
     job = db.query(JudgeJob).filter(JudgeJob.id == job_row[0]).first()
@@ -117,106 +112,91 @@ def _finish_job(job: JudgeJob, status: str, error_message: str = "") -> None:
     job.error_message = (error_message or "")[:4000]
 
 
+def _judge_submission(db, submission):
+    problem = submission.problem
+    if problem is None:
+        return "SE", "문제를 찾을 수 없습니다.", 0, 0
+    if not problem.is_judge_ready:
+        return "SE", "채점 준비 중인 문제입니다.", 0, 0
+    language = normalize_language(submission.language)
+    if language not in _allowed_languages(problem.allowed_languages):
+        return "SE", "이 문제에서 허용되지 않은 언어입니다.", 0, 0
+    ok_tests, message = validate_problem_testcases(problem.id)
+    if not ok_tests:
+        return "SE", message, 0, 0
+    effective_time_limit = effective_time_limit_for_language(
+        problem.time_limit, language, problem.python_time_limit, problem.c_time_limit,
+        problem.cpp_time_limit, problem.java_time_limit,
+    )
+    # Snapshot inputs before logging expires ORM state; do not dirty the live rows.
+    problem_id, code, memory_limit = problem.id, submission.code, problem.memory_limit
+    add_log(db, submission.id, "start", f"problem={problem_id}, language={language}, {message}")
+    return judge_code(problem_id, code, language, effective_time_limit, memory_limit)
+
+
 def judge_one(db) -> bool:
     job = _claim_next_job(db)
     if job is None:
         return False
-
-    submission = db.query(Submission).filter(Submission.id == job.submission_id).first()
+    job_id, submission_id = job.id, job.submission_id
+    submission = db.query(Submission).filter(Submission.id == submission_id).with_for_update().populate_existing().first()
+    db.refresh(job, with_for_update=True)
+    if job.status != "RUNNING":
+        db.rollback()
+        return True
     if submission is None:
         _finish_job(job, "FAILED", "submission not found")
         db.commit()
         return True
-    if job.status == "CANCELED":
-        return True
-
     submission.judge_status = "JUDGING"
     submission.result = "JUDGING"
     submission.detail = f"{WORKER_NAME}에서 채점 중입니다."
     db.commit()
-    db.refresh(submission)
-
     try:
-        problem = submission.problem or db.query(Problem).filter(Problem.id == submission.problem_id).first()
-        if problem is None:
-            submission.result = "SE"
-            submission.detail = "문제를 찾을 수 없습니다."
-            submission.runtime_ms = 0
-            submission.memory_kb = 0
-            submission.judge_status = "FAILED"
-        elif not problem.is_judge_ready:
-            submission.result = "SE"
-            submission.detail = "채점 준비 중인 문제입니다."
-            submission.runtime_ms = 0
-            submission.memory_kb = 0
-            submission.judge_status = "FAILED"
-        elif normalize_language(submission.language) not in _allowed_languages(getattr(problem, "allowed_languages", "python")):
-            submission.result = "SE"
-            submission.detail = "이 문제에서 허용되지 않은 언어입니다."
-            submission.runtime_ms = 0
-            submission.memory_kb = 0
-            submission.judge_status = "FAILED"
-        else:
-            ok_tests, test_message = validate_problem_testcases(problem.id)
-            if not ok_tests:
-                add_log(db, submission.id, "testcase_missing", test_message)
-                submission.result = "SE"
-                submission.detail = test_message
-                submission.runtime_ms = 0
-                submission.memory_kb = 0
-                submission.judge_status = "FAILED"
-                _finish_job(job, "FAILED", test_message)
-                db.commit()
-                add_log(db, submission.id, "finish", f"{submission.result} / {submission.judge_status} / testcase validation failed")
-                return True
-            add_log(db, submission.id, "start", f"job={job.id}, type={job.job_type}, problem={problem.id}, language={submission.language}, {test_message}")
-            language = normalize_language(submission.language)
-            effective_time_limit = effective_time_limit_for_language(
-                problem.time_limit,
-                language,
-                getattr(problem, "python_time_limit", None),
-                getattr(problem, "c_time_limit", None),
-                getattr(problem, "cpp_time_limit", None),
-                getattr(problem, "java_time_limit", None),
-            )
-            result, detail, runtime_ms, memory_kb = judge_code(
-                problem.id,
-                submission.code,
-                language,
-                effective_time_limit,
-                problem.memory_limit,
-            )
-            submission.result = result
-            submission.detail = detail
-            submission.runtime_ms = runtime_ms
-            submission.memory_kb = memory_kb
-            submission.judge_status = "DONE" if result != "SE" else "FAILED"
-        _finish_job(job, "DONE" if submission.judge_status == "DONE" else "FAILED", submission.detail or "")
+        outcome = _judge_submission(db, submission)
     except Exception as exc:
-        err_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        add_log(db, submission.id, "exception", err_text)
-        submission.result = "SE"
-        submission.detail = "채점 워커 오류가 발생했습니다.\n" + "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        submission.runtime_ms = 0
-        submission.memory_kb = 0
-        submission.judge_status = "FAILED"
-        _finish_job(job, "FAILED", err_text)
+        db.rollback()
+        error = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        add_log(db, submission_id, "exception", error)
+        outcome = ("SE", "채점 워커 오류가 발생했습니다.", 0, 0)
 
+    # Serialize with cancellation/rejudge, then re-read job ownership. An obsolete
+    # attempt must never overwrite a newer WAITING/JUDGING/DONE submission.
+    db.rollback()
+    submission = db.query(Submission).filter(Submission.id == submission_id).with_for_update().populate_existing().first()
+    job = db.query(JudgeJob).filter(JudgeJob.id == job_id).with_for_update().populate_existing().first()
+    newer = db.query(JudgeJob.id).filter(JudgeJob.submission_id == submission_id, JudgeJob.id > job_id).first()
+    if submission is None or job is None or job.status != "RUNNING" or newer is not None:
+        db.rollback()
+        add_log(db, submission_id if submission else None, "discard", f"obsolete job={job_id}")
+        return True
+    result, detail, runtime_ms, memory_kb = outcome
+    submission.result, submission.detail = result, detail
+    submission.runtime_ms, submission.memory_kb = runtime_ms, memory_kb
+    submission.judge_status = "FAILED" if result == "SE" else "DONE"
+    _finish_job(job, submission.judge_status, detail if result == "SE" else "")
     db.commit()
-    add_log(db, submission.id, "finish", f"job={job.id} / {submission.result} / {submission.judge_status} / {submission.runtime_ms}ms / {submission.memory_kb}KB")
-    print(f"[{WORKER_NAME}] job #{job.id}, submission #{submission.id}: {submission.result} ({submission.judge_status})", flush=True)
+    add_log(db, submission_id, "finish", f"job={job_id} / {result} / {runtime_ms}ms / {memory_kb}KB")
     return True
+
+
+def _heartbeat_loop(stop):
+    while not stop.is_set():
+        db = SessionLocal()
+        try:
+            add_log(db, None, "heartbeat", f"worker alive / job_types={','.join(sorted(WORKER_JOB_TYPES))}")
+        finally:
+            db.close()
+        stop.wait(HEARTBEAT_INTERVAL)
+
 
 def main() -> None:
     print(f"[{WORKER_NAME}] judge worker started (job_types={','.join(sorted(WORKER_JOB_TYPES))})", flush=True)
-    last_heartbeat = 0.0
+    stop = threading.Event()
+    threading.Thread(target=_heartbeat_loop, args=(stop,), daemon=True).start()
     while True:
         db = SessionLocal()
         try:
-            now_ts = time.time()
-            if now_ts - last_heartbeat >= HEARTBEAT_INTERVAL:
-                add_log(db, None, "heartbeat", f"worker alive / job_types={','.join(sorted(WORKER_JOB_TYPES))}")
-                last_heartbeat = now_ts
             worked = judge_one(db)
         except Exception:
             db.rollback()
@@ -231,3 +211,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

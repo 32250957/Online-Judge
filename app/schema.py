@@ -184,6 +184,11 @@ def _repair_serial_sequence(conn, table_name: str) -> None:
     conn.execute(text("SELECT setval(:seq_name, :next_value, false)"), {"seq_name": seq_name, "next_value": int(max_id) + 1})
 
 
+def repair_serial_sequences(conn) -> None:
+    for table_name in SERIAL_TABLES:
+        _repair_serial_sequence(conn, table_name)
+
+
 def ensure_postgresql_schema(engine: Engine) -> None:
     """Create and patch the PostgreSQL schema used by the judge.
 
@@ -209,10 +214,15 @@ def ensure_postgresql_schema(engine: Engine) -> None:
                 "WHERE table_schema = 'public' AND table_name = :table_name AND column_name = :column_name"
             ), {"table_name": table_name, "column_name": column_name}).scalar()
             if dtype == "timestamp with time zone":
+                local_columns = {("contests", "start_time"), ("contests", "end_time"),
+                                 ("group_practices", "start_time"), ("group_practices", "end_time"),
+                                 ("users", "submit_banned_until"), ("users", "deleted_at"),
+                                 ("contest_questions", "answered_at"), ("contest_editorials", "updated_at")}
+                target_zone = "Asia/Seoul" if (table_name, column_name) in local_columns else "UTC"
                 conn.execute(text(
                     f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
                     "TYPE TIMESTAMP WITHOUT TIME ZONE USING "
-                    f"{column_name} AT TIME ZONE 'Asia/Seoul'"
+                    f"{column_name} AT TIME ZONE '{target_zone}'"
                 ))
 
         for table_name in KNOWN_TABLE_COLUMNS:
@@ -288,3 +298,4 @@ def _index_to_label(index: int) -> str:
         n = n // 26 - 1
         if n < 0:
             return label
+
