@@ -872,8 +872,13 @@ def site_appearance_context(request: Request) -> dict:
     preview = getattr(request.state, "appearance_preview", None)
     if preview is not None:
         return {"site_appearance": preview, "appearance_preview": True}
-    with SessionLocal() as appearance_db:
+    appearance_db = getattr(request.state, "template_db", None)
+    if appearance_db is not None:
         snapshot = appearance_snapshot(appearance_db.get(SiteAppearance, 1))
+    else:
+        # Error pages may render after the route's dependency has already closed.
+        with SessionLocal() as appearance_db:
+            snapshot = appearance_snapshot(appearance_db.get(SiteAppearance, 1))
     return {"site_appearance": snapshot, "appearance_preview": False}
 
 
@@ -1117,11 +1122,15 @@ def default_event_times() -> tuple[datetime, datetime]:
     return start, end
 
 
-def get_db():
+def get_db(request: Request):
     db = SessionLocal()
+    # Template context processors reuse this connection rather than acquiring a
+    # second one while a route still holds the first (pool starvation under load).
+    request.state.template_db = db
     try:
         yield db
     finally:
+        request.state.template_db = None
         db.close()
 
 

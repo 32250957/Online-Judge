@@ -74,6 +74,16 @@ def test_default_clears_schedule():
     assert validate_appearance(form_values(theme="default"), NOW)["ends_at"] is None
 
 
+def test_template_uses_existing_request_connection(db, app_main, monkeypatch):
+    from starlette.requests import Request
+    request = Request({"type":"http", "method":"GET", "path":"/", "headers":[]})
+    request.state.template_db = db
+    def unexpected_connection():
+        raise AssertionError("A template must not acquire a second pooled connection")
+    monkeypatch.setattr(app_main, "SessionLocal", unexpected_connection)
+    assert app_main.site_appearance_context(request)["site_appearance"]["theme"] == "default"
+
+
 def login(client, db, is_admin=True):
     db.add(User(username="appearance-user", password_hash=hash_password("appearance-test-password"), is_admin=is_admin))
     db.commit()
