@@ -1,11 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
 {% set selected_recommendation = recommended_problems[0] if recommended_problems else None %}
+{% include "partials/pepero_hero.html" %}
 <section class="home-hero-main">
     <div class="interactive-card home-hero-card">
+        <div class="home-default-intro">
         <div class="home-system-pill"><span class="pulse-dot"></span> 채점 시스템 정상 · 워커 4개 활성</div>
         <h2 class="home-slogan">THINK.<br>SOLVE.<br><span>GROW.</span></h2>
         <p class="home-copy">문제를 풀고, 대회를 운영하고, 성장 기록을 확인하는 교육용 온라인 저지입니다.</p>
+        </div>
         <div class="hero-actions home-hero-actions-spaced">
             <a class="button hero-primary" href="/problems">문제 풀러가기 <span>›</span></a>
             <a class="button hero-secondary" href="/contests">진행 중 대회 보기</a>

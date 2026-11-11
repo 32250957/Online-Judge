@@ -127,6 +127,7 @@ POSTGRES_COLUMN_MIGRATIONS = [
 
 
 KNOWN_TABLE_COLUMNS = {
+    "site_appearance": {"id", "theme", "color_mode", "motion_enabled", "starts_at", "ends_at"},
     "contests": {"id", "display_number", "title", "description", "start_time", "end_time", "is_public", "is_ended", "is_exam_mode", "hide_ranking", "result_display_mode", "score_enabled", "scoreboard_freeze_enabled", "scoreboard_freeze_minutes", "created_at"},
     "group_contests": {"id", "display_number", "group_id", "contest_id", "title", "description", "created_at"},
     "group_practices": {"id", "group_id", "title", "description", "start_time", "end_time", "created_at"},

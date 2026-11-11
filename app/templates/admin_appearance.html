@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title"><h2>사이트 디자인</h2><a class="button secondary" href="/admin">관리자로 돌아가기</a></div>
+<p class="hint">사이트 전체의 배경과 메인 이벤트 화면을 설정합니다. 모든 시각은 한국 시간(KST, UTC+9)입니다.</p>
+{% if saved %}<div class="info-box" role="status">디자인 설정을 저장했습니다. 예약 기간이 되면 자동으로 적용됩니다.</div>{% endif %}
+{% if error %}<div class="error-box" role="alert">{{ error }}</div>{% endif %}
+<div class="appearance-layout">
+<section class="box appearance-settings">
+    <h3>디자인 및 적용 기간</h3>
+    <p class="hint">현재 상태: <strong>{{ {'default': '기본 디자인', 'active': '적용 중', 'scheduled': '예약됨', 'ended': '종료됨 · 기본 디자인으로 복귀'}.get(appearance_status.status) }}</strong></p>
+    <form method="post" action="/admin/appearance" id="appearance-form">
+        {{ csrf_input(request) }}
+        <label for="appearance-theme">디자인</label>
+        <select name="theme" id="appearance-theme">
+            {% for key, label in themes.items() %}<option value="{{ key }}" {% if values.theme == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+        <fieldset id="appearance-options" {% if values.theme == 'default' %}disabled{% endif %}>
+            <legend>이벤트 디자인 설정</legend>
+            <label for="appearance-color">색상</label>
+            <select name="color_mode" id="appearance-color">
+                {% for key, label in color_modes.items() %}<option value="{{ key }}" {% if values.color_mode == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+            </select>
+            <label for="appearance-start">시작 시각 (KST)</label>
+            <input type="datetime-local" id="appearance-start" name="starts_at" value="{{ values.starts_at }}" aria-describedby="appearance-start-hint">
+            <p class="hint" id="appearance-start-hint">비워두면 저장 즉시 시작합니다. 미래 시각을 지정하면 예약됩니다.</p>
+            <label class="appearance-check" for="appearance-no-end"><input type="checkbox" id="appearance-no-end" name="no_end" value="true" {% if values.no_end %}checked{% endif %}> 종료 없이 계속 적용 (무기한)</label>
+            <label for="appearance-end">종료 시각 (KST)</label>
+            <input type="datetime-local" id="appearance-end" name="ends_at" value="{{ values.ends_at }}" {% if values.no_end %}disabled{% else %}required{% endif %} aria-describedby="appearance-end-hint">
+            <p class="hint" id="appearance-end-hint">종료 시각부터 원래 디자인으로 자동 복귀합니다.</p>
+            <label class="appearance-check" for="appearance-motion"><input type="checkbox" id="appearance-motion" name="motion_enabled" value="true" {% if values.motion_enabled %}checked{% endif %}> 빼빼로가 떠다니는 효과</label>
+        </fieldset>
+        <p class="hint">기본 디자인을 저장하면 예약과 이벤트 적용이 해제됩니다.</p>
+        <button type="submit">설정 저장</button>
+    </form>
+</section>
+<section class="box appearance-preview-panel">
+    <div class="page-title"><h3>저장 전 미리보기</h3><a class="button secondary" id="appearance-preview-link" href="/admin/appearance/preview?theme={{ values.theme if values.theme in themes else 'default' }}&amp;color_mode={{ values.color_mode if values.color_mode in color_modes else 'light' }}&amp;motion_enabled={{ 'true' if values.motion_enabled else 'false' }}" target="_blank" rel="noopener">크게 보기 ↗</a></div>
+    <p class="hint">선택한 디자인을 즉시 보여줍니다. 저장하기 전에는 다른 사용자에게 적용되지 않습니다.</p>
+    <iframe id="appearance-preview" title="선택한 OJ 디자인 미리보기" src="/admin/appearance/preview?theme={{ values.theme if values.theme in themes else 'default' }}&amp;color_mode={{ values.color_mode if values.color_mode in color_modes else 'light' }}&amp;motion_enabled={{ 'true' if values.motion_enabled else 'false' }}" loading="lazy"></iframe>
+</section>
+</div>
+<script defer src="/static/admin-appearance.js?v=1"></script>
+{% endblock %}

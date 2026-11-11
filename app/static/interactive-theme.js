@@ -26,6 +26,7 @@
 
 (function interactiveOjTheme() {
     const root = document.documentElement;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     let targetX = 50;
     let targetY = 28;
     let currentX = targetX;
@@ -33,6 +34,10 @@
     let rafId = null;
 
     function animate() {
+        if (document.body.classList.contains('event-theme') || reducedMotion.matches) {
+            rafId = null;
+            return;
+        }
         currentX += (targetX - currentX) * 0.08;
         currentY += (targetY - currentY) * 0.08;
         root.style.setProperty('--mouse-x', currentX.toFixed(2) + '%');
@@ -49,6 +54,12 @@
 
     window.addEventListener('pointermove', handlePointerMove, { passive: true });
     rafId = requestAnimationFrame(animate);
+
+    window.addEventListener('siteappearancechange', function () {
+        if (!rafId && !document.body.classList.contains('event-theme') && !reducedMotion.matches) {
+            rafId = requestAnimationFrame(animate);
+        }
+    });
 
     window.addEventListener('pagehide', function () {
         if (rafId) cancelAnimationFrame(rafId);

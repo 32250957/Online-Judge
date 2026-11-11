@@ -32,6 +32,11 @@ from app.schema import ensure_postgresql_schema, repair_serial_sequences
 from app.time_utils import local_to_utc, utc_naive
 from app.models import User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Submission, Contest, ContestProblem, ContestQuestion, Group, GroupMember, Message, GroupJoinRequest, GroupProblemSet, GroupContest, GroupPractice, GroupProblemSetProblem, GroupPracticeProblem, JudgeJob, JudgeLog, AuditLog, ContestEditorial, BoardPost, BoardComment, ProfileAsset
 from app.security import hash_password, password_hash_needs_upgrade, verify_password
+from app.models import SiteAppearance
+from app.site_appearance import (
+    THEMES, COLOR_MODES, appearance_snapshot, appearance_form,
+    validate_appearance, save_appearance,
+)
 from app.judge import judge_python, judge_code, normalize_language, language_label, SUPPORTED_LANGUAGES, effective_time_limit_for_language
 from app.services.domain import (
     create_contest_with_problems,
@@ -60,7 +65,7 @@ BACKUP_MODEL_LIST = [
     User, AlgorithmTag, Problem, ProblemExample, ProblemNote, ProblemHint, Contest, ContestProblem,
     ContestEditorial, Submission, ContestQuestion, Group, GroupMember, GroupJoinRequest,
     GroupProblemSet, GroupProblemSetProblem, GroupPractice, GroupPracticeProblem,
-    GroupContest, JudgeJob, JudgeLog, AuditLog, BoardPost, BoardComment, ProfileAsset, Message,
+    GroupContest, JudgeJob, JudgeLog, AuditLog, BoardPost, BoardComment, ProfileAsset, Message, SiteAppearance,
 ]
 BACKUP_RESTORE_CONFIRM_TEXT = "복구합니다"
 ACTIVE_VISITORS: dict[str, float] = {}
@@ -861,7 +866,23 @@ Path("uploads/profiles").mkdir(parents=True, exist_ok=True)
 app.mount("/uploads/editorials", StaticFiles(directory="uploads/editorials"), name="editorial_uploads")
 app.mount("/uploads/profile_assets", StaticFiles(directory="uploads/profile_assets"), name="profile_asset_uploads")
 app.mount("/uploads/profiles", StaticFiles(directory="uploads/profiles"), name="profile_uploads")
-templates = Jinja2Templates(directory="app/templates")
+
+
+def site_appearance_context(request: Request) -> dict:
+    preview = getattr(request.state, "appearance_preview", None)
+    if preview is not None:
+        return {"site_appearance": preview, "appearance_preview": True}
+    appearance_db = getattr(request.state, "template_db", None)
+    if appearance_db is not None:
+        snapshot = appearance_snapshot(appearance_db.get(SiteAppearance, 1))
+    else:
+        # Error pages may render after the route's dependency has already closed.
+        with SessionLocal() as appearance_db:
+            snapshot = appearance_snapshot(appearance_db.get(SiteAppearance, 1))
+    return {"site_appearance": snapshot, "appearance_preview": False}
+
+
+templates = Jinja2Templates(directory="app/templates", context_processors=[site_appearance_context])
 
 
 def rich_text(value):
@@ -955,7 +976,12 @@ templates.env.globals["result_label"] = result_label
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    # Only the authenticated design preview can be embedded by this same OJ.
+    if getattr(request.state, "appearance_preview", None) is not None:
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
@@ -1096,11 +1122,15 @@ def default_event_times() -> tuple[datetime, datetime]:
     return start, end
 
 
-def get_db():
+def get_db(request: Request):
     db = SessionLocal()
+    # Template context processors reuse this connection rather than acquiring a
+    # second one while a route still holds the first (pool starvation under load).
+    request.state.template_db = db
     try:
         yield db
     finally:
+        request.state.template_db = None
         db.close()
 
 
@@ -4284,7 +4314,12 @@ def restore_backup_zip(db: Session, backup_bytes: bytes) -> None:
         restored = {}
         for table in Base.metadata.sorted_tables:
             model = model_by_table[table.name]
-            raw_rows = json.loads(zf.read(f"db/{table.name}.json").decode("utf-8"))
+            table_path = f"db/{table.name}.json"
+            # Backups predating site themes restore to the original design.
+            if table.name == SiteAppearance.__tablename__ and table_path not in zf.namelist():
+                restored[table.name] = []
+                continue
+            raw_rows = json.loads(zf.read(table_path).decode("utf-8"))
             if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
                 raise ValueError(f"잘못된 테이블 데이터: {table.name}")
             restored[table.name] = [
@@ -4482,6 +4517,61 @@ def admin_page(request: Request, db: Session = Depends(get_db)):
         "recent_audit_logs": db.query(AuditLog).order_by(AuditLog.id.desc()).limit(8).all(),
     })
 
+
+
+@app.get("/api/site-appearance")
+def api_site_appearance(db: Session = Depends(get_db)):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(appearance_snapshot(db.get(SiteAppearance, 1)), headers={"Cache-Control": "no-store"})
+
+
+def render_appearance_admin(request, db, user, values=None, error="", saved=False):
+    row = db.get(SiteAppearance, 1)
+    return templates.TemplateResponse("admin_appearance.html", {
+        "request": request, "user": user, "values": values if values is not None else appearance_form(row),
+        "appearance_status": appearance_snapshot(row), "themes": THEMES, "color_modes": COLOR_MODES,
+        "error": error, "saved": saved,
+    }, status_code=422 if error else 200)
+
+
+@app.get("/admin/appearance", response_class=HTMLResponse)
+def admin_appearance_page(request: Request, saved: bool = False, db: Session = Depends(get_db)):
+    return render_appearance_admin(request, db, require_admin(request, db), saved=saved)
+
+
+@app.post("/admin/appearance", response_class=HTMLResponse)
+def admin_save_appearance(
+    request: Request, theme: str = Form("default"), color_mode: str = Form("light"),
+    starts_at: str = Form(""), ends_at: str = Form(""), no_end: bool = Form(False),
+    motion_enabled: bool = Form(False), db: Session = Depends(get_db),
+):
+    user = require_admin(request, db)
+    values = dict(theme=theme, color_mode=color_mode, starts_at=starts_at, ends_at=ends_at,
+                  no_end=no_end, motion_enabled=motion_enabled)
+    try:
+        validated = validate_appearance(values)
+    except ValueError as exc:
+        return render_appearance_admin(request, db, user, values, error=str(exc))
+    save_appearance(db, validated)
+    audit_log(db, request, user, "site_appearance_update", "site_appearance", 1,
+              f"사이트 디자인: {THEMES[theme]} / {COLOR_MODES[color_mode]} / "
+              f"시작(KST): {starts_at or '즉시'} / 종료(KST): {ends_at if not no_end else '무기한'}")
+    db.commit()
+    return RedirectResponse("/admin/appearance?saved=true", status_code=303)
+
+
+@app.get("/admin/appearance/preview", response_class=HTMLResponse)
+def admin_appearance_preview(
+    request: Request, theme: str = "pepero", color_mode: str = "light", motion_enabled: bool = True,
+    db: Session = Depends(get_db),
+):
+    require_admin(request, db)
+    if theme not in THEMES or color_mode not in COLOR_MODES:
+        raise HTTPException(status_code=422, detail="지원하지 않는 디자인입니다.")
+    request.state.appearance_preview = appearance_snapshot(SiteAppearance(
+        theme=theme, color_mode=color_mode, motion_enabled=motion_enabled,
+    ))
+    return site_home(request, db)
 
 
 @app.get("/admin/algorithm-tags", response_class=HTMLResponse)

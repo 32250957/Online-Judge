@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>관리자 페이지</h2>
+<p><a class="button" href="/admin/appearance">사이트 디자인 / 이벤트 기간 설정</a></p>
 <p><a class="button" href="/admin/security">관리자 보안 설정</a> <a class="button" href="/admin/audit-logs">운영 로그</a> <a class="button" href="/admin/permissions">권한 체계 점검</a> <a class="button" href="/admin/worker">채점 워커 상태</a> <a class="button" href="/admin/judge-queue">채점 큐 관리</a> <a class="button" href="/admin/performance">성능 점검</a></p>
 <div class="grid">
     <div class="box"><h3>문제 수</h3><p class="big">{{ problem_count }}</p></div>
